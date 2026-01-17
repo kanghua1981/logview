@@ -283,7 +283,7 @@ async fn extract_metrics(file_path: String, regex: String) -> Result<Vec<MetricD
     Ok(data)
 }
 
-use chrono::{DateTime, NaiveDateTime};
+use chrono::NaiveDateTime;
 
 fn parse_timestamp_to_ms(ts_str: &str) -> f64 {
     if let Ok(val) = ts_str.parse::<f64>() {
@@ -296,7 +296,10 @@ fn parse_timestamp_to_ms(ts_str: &str) -> f64 {
         let formats = [
             "%Y-%m-%d %H:%M:%S%.3f",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%.3f",
+            "%Y/%m/%d %H:%M:%S%.3f",
             "%H:%M:%S%.3f",
+            "%H:%M:%S",
         ];
         
         let mut parsed_ms = None;

@@ -90,7 +90,8 @@ interface LogViewState {
   analysisStats: any[];
   analysisTimeGaps: any[];
   analysisWorkflows: any[];
-  hasAnalyzed: boolean;
+  hasAnalyzedStats: boolean;
+  hasAnalyzedWorkflows: boolean;
 
   // Actions
   addFile: (file: LogFile) => void;
@@ -115,11 +116,13 @@ interface LogViewState {
   // 视图 & 跳转 Actions
   setActiveView: (view: 'log' | 'dashboard' | 'metrics') => void;
   setScrollTargetLine: (line: number | null) => void;
-  setAnalysisResults: (stats: any[], gaps: any[], workflows: any[]) => void;
+  setAnalysisStatsResults: (stats: any[], gaps: any[]) => void;
+  setAnalysisWorkflowResults: (workflows: any[]) => void;
 
   // 新增指标 Actions
   addMetric: (name: string, regex: string) => void;
   removeMetric: (id: string) => void;
+  updateMetricRegex: (id: string, regex: string) => void;
   updateMetricData: (id: string, data: any[]) => void;
   toggleMetric: (id: string) => void;
   
@@ -147,7 +150,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   analysisStats: [],
   analysisTimeGaps: [],
   analysisWorkflows: [],
-  hasAnalyzed: false,
+  hasAnalyzedStats: false,
+  hasAnalyzedWorkflows: false,
   
   // ... 其他 Actions 保持不变
   addFile: (file) => set((state) => {
@@ -172,7 +176,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       analysisStats: isCurrent ? [] : state.analysisStats,
       analysisTimeGaps: isCurrent ? [] : state.analysisTimeGaps,
       analysisWorkflows: isCurrent ? [] : state.analysisWorkflows,
-      hasAnalyzed: isCurrent ? false : state.hasAnalyzed
+      hasAnalyzedStats: isCurrent ? false : state.hasAnalyzedStats,
+      hasAnalyzedWorkflows: isCurrent ? false : state.hasAnalyzedWorkflows
     };
   }),
   
@@ -181,7 +186,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     analysisStats: [],
     analysisTimeGaps: [],
     analysisWorkflows: [],
-    hasAnalyzed: false
+    hasAnalyzedStats: false,
+    hasAnalyzedWorkflows: false
   }),
   setSessions: (sessions) => set({ sessions }),
   setSelectedSessions: (ids) => {
@@ -262,11 +268,14 @@ export const useLogStore = create<LogViewState>((set, get) => ({
 
   setActiveView: (view) => set({ activeView: view }),
   setScrollTargetLine: (line) => set({ scrollTargetLine: line }),
-  setAnalysisResults: (stats, gaps, workflows) => set({ 
+  setAnalysisStatsResults: (stats, gaps) => set({ 
     analysisStats: stats, 
     analysisTimeGaps: gaps, 
-    analysisWorkflows: workflows,
-    hasAnalyzed: true 
+    hasAnalyzedStats: true 
+  }),
+  setAnalysisWorkflowResults: (workflows) => set({ 
+    analysisWorkflows: workflows, 
+    hasAnalyzedWorkflows: true 
   }),
 
   // 指标 Actions 实现
@@ -285,6 +294,9 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   }),
   removeMetric: (id) => set((state) => ({
     metrics: state.metrics.filter(m => m.id !== id)
+  })),
+  updateMetricRegex: (id, regex) => set((state) => ({
+    metrics: state.metrics.map(m => m.id === id ? { ...m, regex, data: [] } : m)
   })),
   updateMetricData: (id, data) => set((state) => ({
     metrics: state.metrics.map(m => m.id === id ? { ...m, data } : m)

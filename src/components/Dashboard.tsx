@@ -50,8 +50,10 @@ export default function Dashboard() {
     analysisStats: stats, 
     analysisTimeGaps: timeGaps, 
     analysisWorkflows: workflows,
-    hasAnalyzed, 
-    setAnalysisResults 
+    hasAnalyzedStats,
+    hasAnalyzedWorkflows,
+    setAnalysisStatsResults,
+    setAnalysisWorkflowResults
   } = useLogStore();
   
   const [loading, setLoading] = useState(false);
@@ -63,10 +65,20 @@ export default function Dashboard() {
   const [idRegex, setIdRegex] = useState('');
   const [isIntervalMode, setIsIntervalMode] = useState(false);
   const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const escapeRegex = (str: string) => {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  };
+
+  const handleApplyPattern = (pattern: string) => {
+    setStartRegex(escapeRegex(pattern));
+  };
 
   const loadStats = async () => {
     if (!currentFile) return;
     setLoading(true);
+    setErrorMsg(null);
     try {
       const [patterns, gaps] = await Promise.all([
         invoke<PatternStat[]>('analyze_log_patterns', { path: currentFile.path }),
@@ -75,9 +87,10 @@ export default function Dashboard() {
           timestampRegex: timestampRegex 
         })
       ]);
-      setAnalysisResults(patterns, gaps, workflows || []);
+      setAnalysisStatsResults(patterns, gaps);
     } catch (err) {
       console.error('Failed to analyze:', err);
+      setErrorMsg('分析失败: ' + err);
     } finally {
       setLoading(false);
     }
@@ -89,6 +102,7 @@ export default function Dashboard() {
       return;
     }
     setWorkflowLoading(true);
+    setErrorMsg(null);
     try {
       let results;
       if (isIntervalMode) {
@@ -106,20 +120,38 @@ export default function Dashboard() {
           idRegex: idRegex || null
         });
       }
-      setAnalysisResults(stats, timeGaps, results);
-    } catch (err) {
-      alert('分析失败: ' + err);
+      
+      if (results.length === 0) {
+        setErrorMsg('未找到匹配流程。请检查：1. 正则表达式是否包含特殊字符(如 []()+)需要转义；2. 时间戳正则是否正确提取了时间；3. 逻辑关键字是否存在。');
+      }
+      setAnalysisWorkflowResults(results);
+    } catch (err: any) {
+      setErrorMsg('计算失败: ' + err);
     } finally {
       setWorkflowLoading(false);
     }
   };
 
   const handleQuickAddMetric = (pattern: string) => {
-    // 尝试从指纹中推断可能的正则
-    // 例如：将 "now free[N]" 转换为 "now free\[(\d+)\]"
-    let suggestedRegex = pattern
-      .replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // 转义特殊字符
-      .replace(/\\N/g, '(\\d+)'); // 将占位符 N 替换为捕获组
+    // 1. 先进行基础的正则转义
+    let escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    
+    // 2. 将特殊占位符替换为正则语法
+    // 将 HH:MM:SS 替换为数字时间匹配
+    escaped = escaped.replace(/HH:MM:SS/g, '\\d{2}:\\d{2}:\\d{2}');
+    
+    // 3. 处理数字占位符 N
+    // 我们假设模式中最后一个 N 是用户关心的数值指标，将其设为捕获组 (\d+)
+    // 其他前面的 N 设为普通的 \d+
+    let suggestedRegex = '';
+    const parts = escaped.split('N');
+    if (parts.length > 1) {
+      // 最后一个 N 之前的所有部分用 \d+ 连接
+      const lastPart = parts.pop();
+      suggestedRegex = parts.join('\\d+') + '(\\d+)' + lastPart;
+    } else {
+      suggestedRegex = escaped;
+    }
       
     const name = window.prompt('请输入指标名称:', '追踪指标');
     if (name) {
@@ -147,14 +179,21 @@ export default function Dashboard() {
           <h2 className="text-2xl font-bold text-white mb-2">智能分析报告</h2>
           <p className="text-sm text-gray-400">正在分析: {currentFile.name}</p>
         </div>
-        {!hasAnalyzed && !loading && (
-          <button
-            onClick={loadStats}
-            className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-blue-900/20 transition-all flex items-center space-x-2"
-          >
-            <span>🚀 启动深度分析</span>
-          </button>
-        )}
+        <div className="flex space-x-3">
+          {errorMsg && (
+            <div className="bg-red-900/30 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-xs max-w-sm flex items-center">
+              ⚠️ {errorMsg}
+            </div>
+          )}
+          {!hasAnalyzedStats && !loading && (
+            <button
+              onClick={loadStats}
+              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-blue-900/20 transition-all flex items-center space-x-2"
+            >
+              <span>🚀 启动全量模式分析</span>
+            </button>
+          )}
+        </div>
       </header>
 
       {/* 概览卡片只在有文件时显示 */}
@@ -174,7 +213,7 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {hasAnalyzed && timeGaps.length > 0 && (
+      {hasAnalyzedStats && timeGaps.length > 0 && (
         <section className="bg-gray-800/30 p-4 rounded-xl border border-gray-700">
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-lg font-semibold text-white flex items-center">
@@ -281,9 +320,9 @@ export default function Dashboard() {
           <div className="flex items-end">
             <button
               onClick={handleWorkflowAnalysis}
-              disabled={workflowLoading || !startRegex || !endRegex}
+              disabled={workflowLoading || !startRegex || (!isIntervalMode && !endRegex)}
               className={`w-full py-1.5 rounded font-bold text-sm transition-all ${
-                workflowLoading || !startRegex || !endRegex 
+                workflowLoading || !startRegex || (!isIntervalMode && !endRegex)
                   ? 'bg-gray-700 text-gray-500 cursor-not-allowed' 
                   : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-900/20'
               }`}
@@ -362,7 +401,7 @@ export default function Dashboard() {
           <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
           <p className="text-gray-400 animate-pulse">正在扫描全量文件提取指纹模式...</p>
         </div>
-      ) : hasAnalyzed ? (
+      ) : hasAnalyzedStats ? (
         <section className="space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-lg font-semibold text-white flex items-center">
@@ -398,6 +437,13 @@ export default function Dashboard() {
                     <span className="text-xs text-gray-500 font-mono">
                       {((stat.count / currentFile.lines) * 100).toFixed(1)}%
                     </span>
+                    <button
+                      onClick={() => handleApplyPattern(stat.content)}
+                      className="opacity-0 group-hover:opacity-100 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded transition-all mr-2"
+                      title="将此关键字应用到下方的流程分析中"
+                    >
+                      🎯 分析此流程
+                    </button>
                     <button
                       onClick={() => handleQuickAddMetric(stat.content)}
                       className="opacity-0 group-hover:opacity-100 bg-blue-600 hover:bg-blue-500 text-white text-[10px] px-2 py-0.5 rounded transition-all"
