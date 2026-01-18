@@ -5,10 +5,12 @@ export default function KeyPathTracker() {
   const { 
     highlights, 
     showOnlyHighlights, 
+    highlightContextLines,
     addHighlight, 
     removeHighlight, 
     toggleHighlight, 
-    setShowOnlyHighlights 
+    setShowOnlyHighlights,
+    setHighlightContextLines
   } = useLogStore();
 
   const [input, setInput] = useState('');
@@ -24,15 +26,28 @@ export default function KeyPathTracker() {
     <div className="p-4 space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-gray-400">关键路径跟踪</h3>
-        <label className="flex items-center space-x-2 cursor-pointer">
-          <span className="text-xs text-gray-500 whitespace-nowrap">仅看追踪</span>
-          <input
-            type="checkbox"
-            checked={showOnlyHighlights}
-            onChange={(e) => setShowOnlyHighlights(e.target.checked)}
-            className="w-4 h-4 rounded border-gray-700 bg-gray-800 text-blue-500 focus:ring-blue-500"
-          />
-        </label>
+        <div className="flex items-center space-x-4">
+          <label className="flex items-center space-x-2 cursor-pointer">
+            <span className="text-xs text-gray-500 whitespace-nowrap">上下文</span>
+            <input
+              type="number"
+              min="0"
+              max="20"
+              value={highlightContextLines}
+              onChange={(e) => setHighlightContextLines(parseInt(e.target.value) || 0)}
+              className="w-12 px-1 py-0.5 bg-gray-800 text-white rounded border border-gray-700 focus:border-blue-500 focus:outline-none text-[10px] text-center"
+            />
+          </label>
+          <label className="flex items-center space-x-2 cursor-pointer">
+            <span className="text-xs text-gray-500 whitespace-nowrap">仅看追踪</span>
+            <input
+              type="checkbox"
+              checked={showOnlyHighlights}
+              onChange={(e) => setShowOnlyHighlights(e.target.checked)}
+              className="w-4 h-4 rounded border-gray-700 bg-gray-800 text-blue-500 focus:ring-blue-500"
+            />
+          </label>
+        </div>
       </div>
 
       <div className="flex space-x-2">

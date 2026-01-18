@@ -1,10 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useLogStore } from '../store';
 
 import {
-  LineChart,
-  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -51,7 +49,6 @@ export default function Dashboard() {
     analysisTimeGaps: timeGaps, 
     analysisWorkflows: workflows,
     hasAnalyzedStats,
-    hasAnalyzedWorkflows,
     setAnalysisStatsResults,
     setAnalysisWorkflowResults
   } = useLogStore();
@@ -71,8 +68,23 @@ export default function Dashboard() {
     return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   };
 
+  const convertPlaceholderToRegex = (pattern: string) => {
+    // 1. 先进行基础的正则转义
+    let escaped = escapeRegex(pattern);
+    
+    // 2. 将特殊占位符替换为正则语法
+    // 将 HH:MM:SS 替换为数字时间匹配
+    escaped = escaped.replace(/HH:MM:SS/g, '\\d{2}:\\d{2}:\\d{2}');
+    // 将 N 替换为数字匹配
+    escaped = escaped.replace(/N/g, '\\d+');
+    // 将 0xADDR 替换为十六进制地址匹配
+    escaped = escaped.replace(/0xADDR/g, '0x[0-9a-fA-F]+');
+    
+    return escaped;
+  };
+
   const handleApplyPattern = (pattern: string) => {
-    setStartRegex(escapeRegex(pattern));
+    setStartRegex(convertPlaceholderToRegex(pattern));
   };
 
   const loadStats = async () => {
@@ -139,6 +151,8 @@ export default function Dashboard() {
     // 2. 将特殊占位符替换为正则语法
     // 将 HH:MM:SS 替换为数字时间匹配
     escaped = escaped.replace(/HH:MM:SS/g, '\\d{2}:\\d{2}:\\d{2}');
+    // 将 0xADDR 替换为十六进制地址匹配
+    escaped = escaped.replace(/0xADDR/g, '0x[0-9a-fA-F]+');
     
     // 3. 处理数字占位符 N
     // 我们假设模式中最后一个 N 是用户关心的数值指标，将其设为捕获组 (\d+)

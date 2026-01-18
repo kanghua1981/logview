@@ -7,7 +7,7 @@ import MetricsPanel from "./components/MetricsPanel";
 import "./App.css";
 
 function App() {
-  const { currentFileId, activeView, setActiveView } = useLogStore();
+  const { activeView, setActiveView } = useLogStore();
 
   return (
     <div className="h-screen w-screen flex flex-col bg-gray-900 text-white overflow-hidden">

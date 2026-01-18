@@ -77,6 +77,7 @@ interface LogViewState {
   timestampRegex: string;
   logLevelFilter: string[];
   highlights: LogHighlight[];
+  highlightContextLines: number;
   showOnlyHighlights: boolean;
 
   // 跳转控制
@@ -108,6 +109,7 @@ interface LogViewState {
   removeHighlight: (id: string) => void;
   toggleHighlight: (id: string) => void;
   setShowOnlyHighlights: (show: boolean) => void;
+  setHighlightContextLines: (lines: number) => void;
   addProfile: (profile: LogProfile) => void;
   updateProfile: (profile: LogProfile) => void;
   deleteProfile: (id: string) => void;
@@ -143,6 +145,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   timestampRegex: '^\\[(.*?)\\]', // 默认提取第一个方括号内容
   logLevelFilter: ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'],
   highlights: [],
+  highlightContextLines: 0,
   showOnlyHighlights: false,
   metrics: [],
   scrollTargetLine: null,
@@ -234,6 +237,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     set({ showOnlyHighlights: show });
     get().filterLogLines();
   },
+  setHighlightContextLines: (lines) => {
+    set({ highlightContextLines: lines });
+    get().filterLogLines();
+  },
 
   addProfile: (profile) => set((state) => {
     const newProfiles = [...state.profiles, profile];
@@ -322,9 +329,26 @@ export const useLogStore = create<LogViewState>((set, get) => ({
 
     if (showOnlyHighlights && highlights.some(h => h.enabled)) {
       const activeHighlights = highlights.filter(h => h.enabled);
-      filtered = filtered.filter(line => 
-        activeHighlights.some(h => line.content.toLowerCase().includes(h.text.toLowerCase()))
-      );
+      const contextLines = get().highlightContextLines;
+      
+      if (contextLines <= 0) {
+        filtered = filtered.filter(line => 
+          activeHighlights.some(h => line.content.toLowerCase().includes(h.text.toLowerCase()))
+        );
+      } else {
+        const matchingLineNumbers = filtered
+          .filter(line => activeHighlights.some(h => line.content.toLowerCase().includes(h.text.toLowerCase())))
+          .map(line => line.lineNumber);
+        
+        const contextLineNumbers = new Set<number>();
+        matchingLineNumbers.forEach(ln => {
+          for (let i = ln - contextLines; i <= ln + contextLines; i++) {
+            if (i > 0) contextLineNumbers.add(i);
+          }
+        });
+        
+        filtered = filtered.filter(line => contextLineNumbers.has(line.lineNumber));
+      }
     }
     
     if (logLevelFilter.length > 0) {
