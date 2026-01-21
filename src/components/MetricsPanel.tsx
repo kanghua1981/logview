@@ -9,13 +9,14 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer
+  ResponsiveContainer,
+  ReferenceLine
 } from 'recharts';
 
 export default function MetricsPanel() {
   const { 
     metrics, addMetric, removeMetric, toggleMetric, updateMetricData, updateMetricRegex,
-    files, currentFileId, setActiveView, setScrollTargetLine 
+    files, currentFileId, setActiveView, setScrollTargetLine, sessions, selectedSessionIds
   } = useLogStore();
   const [newName, setNewName] = useState('');
   const [newRegex, setNewRegex] = useState('');
@@ -77,10 +78,20 @@ export default function MetricsPanel() {
     const enabledMetrics = metrics.filter(m => m.enabled && m.data.length > 0);
     if (enabledMetrics.length === 0) return [];
 
+    const selectedSessions = sessions.filter(s => selectedSessionIds.includes(s.id));
+
     // Map by line number to align multiple series
     const dataMap: Record<number, any> = {};
     enabledMetrics.forEach(m => {
       m.data.forEach(p => {
+        // 如果有选中的会话，则只保留选中会话范围内的点
+        if (selectedSessionIds.length > 0) {
+          const inSelectedSession = selectedSessions.some(
+            s => p.line_number >= s.startLine && p.line_number <= s.endLine
+          );
+          if (!inSelectedSession) return;
+        }
+
         if (!dataMap[p.line_number]) {
           dataMap[p.line_number] = { line: p.line_number };
         }
@@ -89,7 +100,7 @@ export default function MetricsPanel() {
     });
 
     return Object.values(dataMap).sort((a, b) => a.line - b.line);
-  }, [metrics]);
+  }, [metrics, sessions, selectedSessionIds]);
 
   return (
     <div className="flex-1 flex flex-col p-4 space-y-4 overflow-hidden bg-gray-900">
@@ -230,6 +241,8 @@ export default function MetricsPanel() {
                 <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
                 <XAxis 
                   dataKey="line" 
+                  type="number"
+                  domain={['dataMin', 'dataMax']}
                   stroke="#9ca3af" 
                   fontSize={12}
                   label={{ value: '行号 (双击跳转)', position: 'insideBottomRight', offset: -10, fill: '#6b7280' }}
@@ -240,6 +253,28 @@ export default function MetricsPanel() {
                   itemStyle={{ fontSize: '12px' }}
                 />
                 <Legend />
+                
+                {/* 会话分割竖线：仅显示选中的会话，如果没选则显示全部 */}
+                {(selectedSessionIds.length > 0 
+                  ? sessions.filter(s => selectedSessionIds.includes(s.id)) 
+                  : sessions
+                ).map((session) => (
+                  <ReferenceLine
+                    key={`session-${session.id}`}
+                    x={session.startLine}
+                    stroke="#ef4444"
+                    strokeDasharray="5 5"
+                    strokeWidth={1}
+                    label={{ 
+                      value: session.name || `S${session.id + 1}`, 
+                      position: 'top', 
+                      fill: '#ef4444',
+                      fontSize: 10,
+                      fontWeight: 'bold'
+                    }}
+                  />
+                ))}
+
                 {metrics.filter(m => m.enabled).map(m => (
                   <Line
                     key={m.id}

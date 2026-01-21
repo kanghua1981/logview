@@ -96,6 +96,23 @@ async fn parse_log_content(
     boot_regex: String,
     level_regex: String
 ) -> Result<ParsedLog, String> {
+    parse_log_with_splitters(path, vec![boot_regex], level_regex).await
+}
+
+#[tauri::command]
+async fn parse_log_with_custom_splitters(
+    path: String,
+    splitter_regexes: Vec<String>,
+    level_regex: String
+) -> Result<ParsedLog, String> {
+    parse_log_with_splitters(path, splitter_regexes, level_regex).await
+}
+
+async fn parse_log_with_splitters(
+    path: String, 
+    splitter_regexes: Vec<String>,
+    level_regex: String
+) -> Result<ParsedLog, String> {
     // 读取文件内容（支持非UTF-8编码）
     let bytes = fs::read(&path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
@@ -105,12 +122,21 @@ async fn parse_log_content(
     let mut sessions: Vec<LogSession> = Vec::new();
     let mut log_lines: Vec<LogLine> = Vec::new();
     
-    // 编译 Boot 标识符正则
-    let boot_re = if !boot_regex.is_empty() {
-        Regex::new(&boot_regex).ok()
-    } else {
-        None
-    };
+    // 编译所有分割器正则
+    let mut compiled_splitters = Vec::new();
+    for regex_str in &splitter_regexes {
+        if !regex_str.is_empty() {
+            if let Ok(re) = Regex::new(regex_str) {
+                compiled_splitters.push(re);
+            }
+        }
+    }
+    
+    // 如果没有有效的分割器，使用默认
+    if compiled_splitters.is_empty() {
+        let default_re = Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").unwrap();
+        compiled_splitters.push(default_re);
+    }
     
     // 检测日志级别的正则
     let level_re = if !level_regex.is_empty() {
@@ -119,7 +145,7 @@ async fn parse_log_content(
         Regex::new(r"(?i)\b(DEBUG|INFO|WARN|ERROR|FATAL)\b").ok()
     };
     
-    let mut current_session_start = 0;
+    let mut current_session_start = 1;
     let mut session_id = 0;
     
     for (idx, line) in lines.iter().enumerate() {
@@ -137,20 +163,27 @@ async fn parse_log_content(
                 }
             });
         
-        // 检查是否是 Boot 标记
-        let is_boot = if let Some(ref re) = boot_re {
-            re.is_match(line)
-        } else {
-            false
-        };
+        // 检查是否匹配任何一个分割器
+        let mut is_session_start = false;
+        let mut matched_marker = String::new();
         
-        if is_boot && idx > 0 {
+        for splitter in &compiled_splitters {
+            if splitter.is_match(line) {
+                is_session_start = true;
+                matched_marker = splitter.find(line)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_else(|| line.to_string());
+                break;
+            }
+        }
+        
+        if is_session_start && idx > 0 {
             // 结束上一个会话
             sessions.push(LogSession {
                 id: session_id,
                 start_line: current_session_start,
-                end_line: idx,
-                boot_marker: lines[idx].to_string(),
+                end_line: line_num - 1,
+                boot_marker: matched_marker.clone(),
             });
             
             session_id += 1;
@@ -283,6 +316,46 @@ async fn extract_metrics(file_path: String, regex: String) -> Result<Vec<MetricD
     Ok(data)
 }
 
+#[tauri::command]
+async fn save_sessions(
+    source_path: String,
+    target_path: String,
+    ranges: Vec<(usize, usize)>
+) -> Result<(), String> {
+    let bytes = fs::read(&source_path)
+        .map_err(|e| format!("Failed to read source file: {}", e))?;
+    let content = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = content.lines().collect();
+
+    let mut output = String::new();
+    for (start, end) in ranges {
+        // start and end are 1-based line numbers
+        if start > 0 && start <= lines.len() && end >= start {
+            let actual_end = if end > lines.len() { lines.len() } else { end };
+            for i in (start - 1)..(actual_end) {
+                output.push_str(lines[i]);
+                output.push('\n');
+            }
+        }
+    }
+
+    fs::write(&target_path, output)
+        .map_err(|e| format!("Failed to write to target file: {}", e))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn write_config_file(path: String, content: String) -> Result<(), String> {
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn read_config_file(path: String) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
 use chrono::NaiveDateTime;
 
 fn parse_timestamp_to_ms(ts_str: &str) -> f64 {
@@ -296,6 +369,7 @@ fn parse_timestamp_to_ms(ts_str: &str) -> f64 {
         let formats = [
             "%Y-%m-%d %H:%M:%S%.3f",
             "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d_%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S%.3f",
             "%Y/%m/%d %H:%M:%S%.3f",
             "%H:%M:%S%.3f",
@@ -391,14 +465,19 @@ async fn analyze_workflow_duration(
     use std::collections::HashMap;
     let mut active_starts_with_id: HashMap<String, (usize, f64)> = HashMap::new();
     let mut active_starts_no_id: Vec<(usize, f64)> = Vec::new();
+    let mut last_ts = 0.0;
 
     for (idx, line) in content.lines().enumerate() {
         let line_num = idx + 1;
         
-        let ts = ts_re.captures(line)
-            .and_then(|c| c.get(1))
-            .map(|m| parse_timestamp_to_ms(m.as_str()))
-            .unwrap_or(0.0);
+        if let Some(caps) = ts_re.captures(line) {
+            if let Some(m) = caps.get(1) {
+                let ts = parse_timestamp_to_ms(m.as_str());
+                if ts > 0.0 {
+                    last_ts = ts;
+                }
+            }
+        }
         
         let id = id_re.as_ref()
             .and_then(|re| re.captures(line))
@@ -412,33 +491,33 @@ async fn analyze_workflow_duration(
 
         if start_re.is_match(line) {
             if let Some(ref flow_id) = id {
-                active_starts_with_id.insert(flow_id.clone(), (line_num, ts));
+                active_starts_with_id.insert(flow_id.clone(), (line_num, last_ts));
             } else {
-                active_starts_no_id.push((line_num, ts));
+                active_starts_no_id.push((line_num, last_ts));
             }
         } else if end_re.is_match(line) {
             if let Some(ref flow_id) = id {
                 if let Some((s_line, s_ts)) = active_starts_with_id.remove(flow_id) {
-                    if ts > 0.0 && s_ts > 0.0 {
+                    if last_ts > 0.0 && s_ts > 0.0 {
                         segments.push(WorkflowSegment {
                             start_line: s_line,
                             end_line: line_num,
                             start_time: s_ts,
-                            end_time: ts,
-                            duration_ms: ts - s_ts,
+                            end_time: last_ts,
+                            duration_ms: last_ts - s_ts,
                             id: Some(flow_id.clone()),
                         });
                     }
                 }
             } else {
                 if let Some((s_line, s_ts)) = active_starts_no_id.pop() {
-                    if ts > 0.0 && s_ts > 0.0 {
+                    if last_ts > 0.0 && s_ts > 0.0 {
                         segments.push(WorkflowSegment {
                             start_line: s_line,
                             end_line: line_num,
                             start_time: s_ts,
-                            end_time: ts,
-                            duration_ms: ts - s_ts,
+                            end_time: last_ts,
+                            duration_ms: last_ts - s_ts,
                             id: None,
                         });
                     }
@@ -464,28 +543,33 @@ async fn analyze_recurrent_intervals(
 
     let mut segments = Vec::new();
     let mut last_hit: Option<(usize, f64)> = None;
+    let mut last_ts = 0.0;
 
     for (idx, line) in content.lines().enumerate() {
         let line_num = idx + 1;
         
-        if re.is_match(line) {
-            let ts = ts_re.captures(line)
-                .and_then(|c| c.get(1))
-                .map(|m| parse_timestamp_to_ms(m.as_str()))
-                .unwrap_or(0.0);
+        if let Some(caps) = ts_re.captures(line) {
+            if let Some(m) = caps.get(1) {
+                let ts = parse_timestamp_to_ms(m.as_str());
+                if ts > 0.0 {
+                    last_ts = ts;
+                }
+            }
+        }
 
-            if ts > 0.0 {
+        if re.is_match(line) {
+            if last_ts > 0.0 {
                 if let Some((prev_line, prev_ts)) = last_hit {
                     segments.push(WorkflowSegment {
                         start_line: prev_line,
                         end_line: line_num,
                         start_time: prev_ts,
-                        end_time: ts,
-                        duration_ms: ts - prev_ts,
+                        end_time: last_ts,
+                        duration_ms: last_ts - prev_ts,
                         id: None,
                     });
                 }
-                last_hit = Some((line_num, ts));
+                last_hit = Some((line_num, last_ts));
             }
         }
     }
@@ -518,11 +602,15 @@ pub fn run() {
             greet,
             parse_log_file,
             parse_log_content,
+            parse_log_with_custom_splitters,
             analyze_log_patterns,
             extract_metrics,
             analyze_time_gaps,
             analyze_workflow_duration,
-            analyze_recurrent_intervals
+            analyze_recurrent_intervals,
+            save_sessions,
+            write_config_file,
+            read_config_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

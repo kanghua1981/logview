@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useLogStore, LogProfile } from '../store';
 import { loadLogFile } from './FileManager';
+import { save, open } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 
 export default function ConfigPanel() {
   const { 
@@ -8,20 +10,25 @@ export default function ConfigPanel() {
     activeProfileId, 
     bootMarkerRegex, 
     logLevelRegex,
+    timestampRegex,
     logLevelFilter,
     files,
     currentFileId,
     setBootMarkerRegex,
     setLogLevelRegex,
+    setTimestampRegex,
     setLogLevelFilter,
     addProfile,
     updateProfile,
     deleteProfile,
-    setActiveProfile
+    setActiveProfile,
+    exportConfig,
+    importConfig
   } = useLogStore();
 
   const [bootInput, setBootInput] = useState(bootMarkerRegex);
   const [levelInput, setLevelInput] = useState(logLevelRegex);
+  const [timestampInput, setTimestampInput] = useState(timestampRegex);
   const [profileName, setProfileName] = useState('');
 
   const currentFile = files.find(f => f.id === currentFileId);
@@ -29,11 +36,12 @@ export default function ConfigPanel() {
   useEffect(() => {
     setBootInput(bootMarkerRegex);
     setLevelInput(logLevelRegex);
+    setTimestampInput(timestampRegex);
     const activeProfile = profiles.find(p => p.id === activeProfileId);
     if (activeProfile) {
       setProfileName(activeProfile.name);
     }
-  }, [bootMarkerRegex, logLevelRegex, activeProfileId, profiles]);
+  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles]);
 
   const logLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
 
@@ -48,6 +56,7 @@ export default function ConfigPanel() {
   const handleApply = async () => {
     setBootMarkerRegex(bootInput);
     setLogLevelRegex(levelInput);
+    setTimestampRegex(timestampInput);
     
     // 如果有当前文件，触发重新解析
     if (currentFile) {
@@ -66,22 +75,86 @@ export default function ConfigPanel() {
         ...activeProfile,
         name: profileName,
         bootMarkerRegex: bootInput,
-        logLevelRegex: levelInput
+        logLevelRegex: levelInput,
+        timestampRegex: timestampInput
       });
     } else {
       const newProfile: LogProfile = {
         id: Date.now().toString(),
         name: profileName || '新预设',
         bootMarkerRegex: bootInput,
-        logLevelRegex: levelInput
+        logLevelRegex: levelInput,
+        timestampRegex: timestampInput
       };
       addProfile(newProfile);
       setActiveProfile(newProfile.id);
     }
   };
 
+  const handleExportConfig = async () => {
+    try {
+      const configJson = exportConfig();
+      const path = await save({
+        filters: [{ name: 'Log Analysis Config', extensions: ['json'] }],
+        defaultPath: 'log_analysis_config.json'
+      });
+      if (path) {
+        await invoke('write_config_file', { path, content: configJson });
+        alert('配置导出成功！');
+      }
+    } catch (err) {
+      console.error('Failed to export config:', err);
+      alert('导出失败: ' + err);
+    }
+  };
+
+  const handleImportConfig = async () => {
+    try {
+      const path = await open({
+        filters: [{ name: 'Log Analysis Config', extensions: ['json'] }],
+        multiple: false
+      });
+      if (path && typeof path === 'string') {
+        const content = await invoke<string>('read_config_file', { path });
+        const success = importConfig(content);
+        if (success) {
+          alert('配置导入成功！');
+        } else {
+          alert('配置导入失败：文件格式不符合要求');
+        }
+      }
+    } catch (err) {
+      console.error('Failed to import config:', err);
+      alert('导入失败: ' + err);
+    }
+  };
+
   return (
     <div className="p-4 space-y-6">
+      {/* 导入导出全局配置 */}
+      <div className="bg-blue-900/20 border border-blue-800/50 p-4 rounded-lg space-y-3">
+        <h3 className="text-sm font-semibold text-blue-300 flex items-center">
+          <span className="mr-2">💾</span> 全局解析方案管理
+        </h3>
+        <p className="text-[10px] text-blue-400/80">
+          导出所有正则、会话分割器、高亮及指标定义。
+        </p>
+        <div className="flex space-x-2">
+          <button 
+            onClick={handleExportConfig}
+            className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-medium transition-colors"
+          >
+            导出方案
+          </button>
+          <button 
+            onClick={handleImportConfig}
+            className="flex-1 py-1.5 border border-blue-600 text-blue-400 hover:bg-blue-600/10 rounded text-xs font-medium transition-colors"
+          >
+            导入方案
+          </button>
+        </div>
+      </div>
+
       {/* 预设管理 */}
       <div>
         <h3 className="text-sm font-semibold text-gray-400 mb-3">预设模式</h3>
@@ -146,6 +219,21 @@ export default function ConfigPanel() {
         />
         <p className="text-[10px] text-gray-500 mt-1">
           提示：通过第一个捕获组提取级别名称
+        </p>
+      </div>
+
+      {/* 时间戳识别正则 */}
+      <div>
+        <h3 className="text-sm font-semibold text-gray-400 mb-3">时间戳提取 (正则)</h3>
+        <input
+          type="text"
+          value={timestampInput}
+          onChange={(e) => setTimestampInput(e.target.value)}
+          placeholder="例如: \[(.*?)\]"
+          className="w-full px-3 py-2 bg-gray-800 text-white rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm font-mono"
+        />
+        <p className="text-[10px] text-gray-500 mt-1">
+          提示：提取方括号内的时间，支持带串口前缀的日志
         </p>
       </div>
 

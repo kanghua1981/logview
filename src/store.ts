@@ -15,6 +15,17 @@ export interface LogSession {
   endLine: number;
   bootMarker: string;
   timestamp?: string;
+  name?: string; // 用户自定义会话名称
+  splitType?: 'boot' | 'custom'; // 分割类型
+}
+
+export interface SessionSplitter {
+  id: string;
+  name: string;
+  regex: string;
+  enabled: boolean;
+  isRegex: boolean; // 新增：是否使用正则表达式
+  color?: string; // 用于UI显示
 }
 
 export interface LogLine {
@@ -29,6 +40,7 @@ export interface LogProfile {
   name: string;
   bootMarkerRegex: string;
   logLevelRegex: string;
+  timestampRegex: string;
 }
 
 const DEFAULT_PROFILES: LogProfile[] = [
@@ -36,13 +48,15 @@ const DEFAULT_PROFILES: LogProfile[] = [
     id: 'default', 
     name: '标准模式', 
     bootMarkerRegex: '(?i)(system|boot|start)(ed|ing|up)',
-    logLevelRegex: '(?i)\\b(DEBUG|INFO|WARN|ERROR|FATAL)\\b'
+    logLevelRegex: '(?i)\\b(DEBUG|INFO|WARN|ERROR|FATAL)\\b',
+    timestampRegex: '\\[(.*?)\\]'
   },
   { 
     id: 'uboot', 
     name: 'U-Boot/Kernel', 
     bootMarkerRegex: 'U-Boot|Linux version',
-    logLevelRegex: '(?i)\\b(DEBUG|INFO|WARN|ERROR|FATAL)\\b'
+    logLevelRegex: '(?i)\\b(DEBUG|INFO|WARN|ERROR|FATAL)\\b',
+    timestampRegex: '\\[(.*?)\\]'
   }
 ];
 
@@ -68,6 +82,8 @@ interface LogViewState {
   currentFileId: string | null;
   sessions: LogSession[];
   selectedSessionIds: number[];
+  sessionSplitters: SessionSplitter[]; // 会话分割器列表
+  activeSessionMode: 'boot' | 'custom'; // 当前使用的会话模式
   logLines: LogLine[];
   filteredLines: LogLine[];
   profiles: LogProfile[];
@@ -100,6 +116,14 @@ interface LogViewState {
   setCurrentFile: (id: string) => void;
   setSessions: (sessions: LogSession[]) => void;
   setSelectedSessions: (ids: number[]) => void;
+  
+  // 会话分割器管理
+  addSessionSplitter: (name: string, regex: string, isRegex: boolean) => void;
+  removeSessionSplitter: (id: string) => void;
+  toggleSessionSplitter: (id: string) => void;
+  updateSessionSplitter: (id: string, regex: string) => void;
+  setActiveSessionMode: (mode: 'boot' | 'custom') => void;
+  applySessionSplitters: () => Promise<void>;
   setLogLines: (lines: LogLine[]) => void;
   setTimestampRegex: (regex: string) => void;
   setBootMarkerRegex: (regex: string) => void;
@@ -128,6 +152,10 @@ interface LogViewState {
   updateMetricData: (id: string, data: any[]) => void;
   toggleMetric: (id: string) => void;
   
+  // 导入导出配置
+  exportConfig: () => string;
+  importConfig: (json: string) => boolean;
+
   filterLogLines: () => void;
 }
 
@@ -136,13 +164,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   currentFileId: null,
   sessions: [],
   selectedSessionIds: [],
+  sessionSplitters: JSON.parse(localStorage.getItem('session_splitters') || '[]'),
+  activeSessionMode: (localStorage.getItem('active_session_mode') as 'boot' | 'custom') || 'boot',
   logLines: [],
   filteredLines: [],
   profiles: JSON.parse(localStorage.getItem('log_profiles') || JSON.stringify(DEFAULT_PROFILES)),
   activeProfileId: localStorage.getItem('active_profile_id') || 'default',
   bootMarkerRegex: '',
   logLevelRegex: '',
-  timestampRegex: '^\\[(.*?)\\]', // 默认提取第一个方括号内容
+  timestampRegex: '\\[(.*?)\\]', // 修改：不再强制要求在行首，以兼容带串口前缀的日志
   logLevelFilter: ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'],
   highlights: [],
   highlightContextLines: 0,
@@ -176,6 +206,12 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     return {
       files: state.files.filter(f => f.id !== id),
       currentFileId: isCurrent ? null : state.currentFileId,
+      logLines: isCurrent ? [] : state.logLines,
+      filteredLines: isCurrent ? [] : state.filteredLines,
+      sessions: isCurrent ? [] : state.sessions,
+      selectedSessionIds: isCurrent ? [] : state.selectedSessionIds,
+      metrics: isCurrent ? state.metrics.map(m => ({ ...m, data: [] })) : state.metrics,
+      scrollTargetLine: isCurrent ? null : state.scrollTargetLine,
       analysisStats: isCurrent ? [] : state.analysisStats,
       analysisTimeGaps: isCurrent ? [] : state.analysisTimeGaps,
       analysisWorkflows: isCurrent ? [] : state.analysisWorkflows,
@@ -184,14 +220,20 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     };
   }),
   
-  setCurrentFile: (id) => set({ 
+  setCurrentFile: (id) => set((state) => ({ 
     currentFileId: id,
+    logLines: [],
+    filteredLines: [],
+    sessions: [],
+    selectedSessionIds: [],
+    metrics: state.metrics.map(m => ({ ...m, data: [] })),
+    scrollTargetLine: null,
     analysisStats: [],
     analysisTimeGaps: [],
     analysisWorkflows: [],
     hasAnalyzedStats: false,
     hasAnalyzedWorkflows: false
-  }),
+  })),
   setSessions: (sessions) => set({ sessions }),
   setSelectedSessions: (ids) => {
     set({ selectedSessionIds: ids });
@@ -267,7 +309,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       return { 
         activeProfileId: id,
         bootMarkerRegex: profile.bootMarkerRegex,
-        logLevelRegex: profile.logLevelRegex
+        logLevelRegex: profile.logLevelRegex,
+        timestampRegex: profile.timestampRegex || '\\[(.*?)\\]'
       };
     }
     return state;
@@ -311,6 +354,105 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   toggleMetric: (id) => set((state) => ({
     metrics: state.metrics.map(m => m.id === id ? { ...m, enabled: !m.enabled } : m)
   })),
+  exportConfig: () => {
+    const state = get();
+    const config = {
+      version: '1.0',
+      timestamp: new Date().toISOString(),
+      analysis: {
+        bootMarkerRegex: state.bootMarkerRegex,
+        logLevelRegex: state.logLevelRegex,
+        timestampRegex: state.timestampRegex,
+        logLevelFilter: state.logLevelFilter,
+        activeSessionMode: state.activeSessionMode,
+      },
+      sessionSplitters: state.sessionSplitters,
+      highlights: state.highlights,
+      metrics: state.metrics.map(({ id, name, regex, color, enabled }) => ({
+        id, name, regex, color, enabled, data: [] // 不导出提取出的数据
+      }))
+    };
+    return JSON.stringify(config, null, 2);
+  },
+
+  importConfig: (json: string) => {
+    try {
+      const config = JSON.parse(json);
+      if (!config.analysis) throw new Error('无效的配置文件');
+
+      set({
+        bootMarkerRegex: config.analysis.bootMarkerRegex || '',
+        logLevelRegex: config.analysis.logLevelRegex || '',
+        timestampRegex: config.analysis.timestampRegex || '',
+        logLevelFilter: config.analysis.logLevelFilter || [],
+        activeSessionMode: config.analysis.activeSessionMode || 'boot',
+        sessionSplitters: config.sessionSplitters || [],
+        highlights: config.highlights || [],
+        metrics: config.metrics || [],
+      });
+
+      // 同步到本地存储
+      localStorage.setItem('session_splitters', JSON.stringify(config.sessionSplitters || []));
+      localStorage.setItem('active_session_mode', config.analysis.activeSessionMode || 'boot');
+      
+      return true;
+    } catch (err) {
+      console.error('Failed to import config:', err);
+      // alert('导入失败: ' + err);
+      return false;
+    }
+  },  
+  // 会话分割器管理实现
+  addSessionSplitter: (name, regex, isRegex) => set((state) => {
+    const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+    const newSplitter: SessionSplitter = {
+      id: Date.now().toString(),
+      name,
+      regex,
+      enabled: true,
+      isRegex,
+      color: colors[state.sessionSplitters.length % colors.length]
+    };
+    const newSplitters = [...state.sessionSplitters, newSplitter];
+    localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
+    return { sessionSplitters: newSplitters };
+  }),
+  
+  removeSessionSplitter: (id) => set((state) => {
+    const newSplitters = state.sessionSplitters.filter(s => s.id !== id);
+    localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
+    return { sessionSplitters: newSplitters };
+  }),
+  
+  toggleSessionSplitter: (id) => set((state) => {
+    const newSplitters = state.sessionSplitters.map(s => 
+      s.id === id ? { ...s, enabled: !s.enabled } : s
+    );
+    localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
+    return { sessionSplitters: newSplitters };
+  }),
+  
+  updateSessionSplitter: (id, regex) => set((state) => {
+    const newSplitters = state.sessionSplitters.map(s => 
+      s.id === id ? { ...s, regex } : s
+    );
+    localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
+    return { sessionSplitters: newSplitters };
+  }),
+  
+  setActiveSessionMode: (mode) => {
+    localStorage.setItem('active_session_mode', mode);
+    set({ activeSessionMode: mode });
+  },
+  
+  applySessionSplitters: async () => {
+    const state = get();
+    const currentFile = state.files.find(f => f.id === state.currentFileId);
+    if (!currentFile) return;
+    
+    const { loadLogFile } = await import('./components/FileManager');
+    await loadLogFile(currentFile.path);
+  },
   
   filterLogLines: () => {
     const { logLines, logLevelFilter, selectedSessionIds, sessions, highlights, showOnlyHighlights } = get();
@@ -372,7 +514,8 @@ if (initialState.profiles.length > 0) {
   const activeProfile = initialState.profiles.find(p => p.id === initialState.activeProfileId) || initialState.profiles[0];
   useLogStore.setState({
     bootMarkerRegex: activeProfile.bootMarkerRegex,
-    logLevelRegex: activeProfile.logLevelRegex
+    logLevelRegex: activeProfile.logLevelRegex,
+    timestampRegex: activeProfile.timestampRegex || '\\[(.*?)\\]'
   });
 }
 

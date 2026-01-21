@@ -95,7 +95,6 @@ export default function FileManager() {
   const files = useLogStore((state) => state.files);
   const currentFileId = useLogStore((state) => state.currentFileId);
   const removeFile = useLogStore((state) => state.removeFile);
-  const setCurrentFile = useLogStore((state) => state.setCurrentFile);
 
   const handleOpenFile = useCallback(async () => {
     try {
@@ -138,7 +137,11 @@ export default function FileManager() {
           files.map((file) => (
             <div
               key={file.id}
-              onClick={() => setCurrentFile(file.id)}
+              onClick={() => {
+                if (currentFileId !== file.id) {
+                  loadLogFile(file.path);
+                }
+              }}
               className={`p-3 rounded-lg cursor-pointer transition-colors ${
                 currentFileId === file.id
                   ? 'bg-blue-600 text-white'
