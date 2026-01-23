@@ -33,7 +33,8 @@ pub struct LogLine {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ParsedLog {
     sessions: Vec<LogSession>,
-    lines: Vec<LogLine>,
+    line_count: usize,
+    levels: Vec<Option<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -293,17 +294,12 @@ async fn parse_log_content(
         });
 
         // 返回时带上级别元数据 (但不带 content，减少序列化压力)
-        let lines_meta: Vec<LogLine> = index.levels.par_iter().enumerate().map(|(idx, lv)| {
-            LogLine {
-                line_number: idx + 1,
-                content: String::new(), // 内容先留空
-                level: lv.clone(),
-            }
-        }).collect();
+        let levels = index.levels.clone();
 
         Ok(ParsedLog {
             sessions,
-            lines: lines_meta,
+            line_count,
+            levels,
         })
     } else {
         // 如果状态中没有索引，尝试重新解析 (或者返回错误)
@@ -384,17 +380,12 @@ async fn parse_log_with_custom_splitters(
     });
 
     // 兼容性返回：只带元数据
-    let lines_meta: Vec<LogLine> = index.levels.par_iter().enumerate().map(|(idx, lv)| {
-        LogLine {
-            line_number: idx + 1,
-            content: String::new(),
-            level: lv.clone(),
-        }
-    }).collect();
+    let levels = index.levels.clone();
 
     Ok(ParsedLog {
         sessions,
-        lines: lines_meta,
+        line_count,
+        levels,
     })
 }
 
@@ -451,35 +442,49 @@ async fn analyze_log_patterns(state: State<'_, AppState>) -> Result<Vec<PatternS
     let bytes = &index.mmap[..];
     let offsets = &index.offsets;
     
-    use std::collections::HashMap;
-    // 使用并行 map-reduce 来处理模式提取可能会比较复杂，先尝试串行提取但基于内存映射
-    let mut patterns: HashMap<String, (usize, Option<String>)> = HashMap::new();
-    
-    // 预编译正则
+    // 预编译正则，放在循环外
     let ts_re = Regex::new(r"\d{2}:\d{2}:\d{2}").unwrap();
     let n_re = Regex::new(r"\d+").unwrap();
     let addr_re = Regex::new(r"0x[0-9a-fA-F]+").unwrap();
 
-    for idx in 0..offsets.len() {
-        let start = offsets[idx];
-        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-        let line = String::from_utf8_lossy(&bytes[start..end]);
-        if line.trim().is_empty() { continue; }
-        
-        let mut fingerprint = line.to_string();
-        fingerprint = ts_re.replace_all(&fingerprint, "HH:MM:SS").into_owned();
-        fingerprint = n_re.replace_all(&fingerprint, "N").into_owned();
-        fingerprint = addr_re.replace_all(&fingerprint, "0xADDR").into_owned();
+    // 使用 parallel fold 和 reduce 来加速聚合并减少中间内存占用
+    use std::collections::HashMap;
+    
+    let pattern_counts: HashMap<String, (usize, Option<String>)> = (0..offsets.len()).into_par_iter().fold(
+        || HashMap::<String, (usize, Option<String>)>::new(),
+        |mut acc, idx| {
+            let start = offsets[idx];
+            let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+            let line = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
+            if line.trim().is_empty() { return acc; }
 
-        let count_tuple = patterns.entry(fingerprint).or_insert((0, None));
-        count_tuple.0 += 1;
-        
-        if count_tuple.1.is_none() {
-            count_tuple.1 = index.levels[idx].clone();
+            let mut fingerprint = line;
+            fingerprint = ts_re.replace_all(&fingerprint, "HH:MM:SS").into_owned();
+            fingerprint = n_re.replace_all(&fingerprint, "N").into_owned();
+            fingerprint = addr_re.replace_all(&fingerprint, "0xADDR").into_owned();
+
+            let entry = acc.entry(fingerprint).or_insert((0, None));
+            entry.0 += 1;
+            if entry.1.is_none() {
+                entry.1 = index.levels[idx].clone();
+            }
+            acc
         }
-    }
+    ).reduce(
+        || HashMap::new(),
+        |mut m1, m2| {
+            for (k, v) in m2 {
+                let entry = m1.entry(k).or_insert((0, None));
+                entry.0 += v.0;
+                if entry.1.is_none() {
+                    entry.1 = v.1;
+                }
+            }
+            m1
+        }
+    );
 
-    let mut stats: Vec<PatternStat> = patterns.into_iter()
+    let mut stats: Vec<PatternStat> = pattern_counts.into_iter()
         .map(|(content, (count, level))| PatternStat { content, count, level })
         .collect();
     
@@ -744,10 +749,8 @@ async fn analyze_time_gaps(timestamp_regex: String, state: State<'_, AppState>) 
     let bytes = &index.mmap[..];
     let offsets = &index.offsets;
 
-    let mut last_time: Option<f64> = None;
-    let mut gaps = Vec::new();
-
-    for idx in 0..offsets.len() {
+    // 1. 并行提取所有行的时间戳
+    let timestamps: Vec<Option<f64>> = (0..offsets.len()).into_par_iter().map(|idx| {
         let start = offsets[idx];
         let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
         let line = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
@@ -755,19 +758,29 @@ async fn analyze_time_gaps(timestamp_regex: String, state: State<'_, AppState>) 
         if let Some(caps) = re.captures(&line) {
             let ts_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let current_ms = parse_timestamp_to_ms(ts_str);
-
             if current_ms > 0.0 {
-                if let Some(last) = last_time {
-                    let diff = current_ms - last;
-                    if diff > 10.0 {
-                        gaps.push(TimeGap {
-                            line_number: idx + 1,
-                            gap_ms: diff,
-                        });
-                    }
-                }
-                last_time = Some(current_ms);
+                return Some(current_ms);
             }
+        }
+        None
+    }).collect();
+
+    // 2. 串行计算差值
+    let mut last_time: Option<f64> = None;
+    let mut gaps = Vec::new();
+
+    for (idx, ts_opt) in timestamps.into_iter().enumerate() {
+        if let Some(current_ms) = ts_opt {
+            if let Some(last) = last_time {
+                let diff = current_ms - last;
+                if diff > 10.0 {
+                    gaps.push(TimeGap {
+                        line_number: idx + 1,
+                        gap_ms: diff,
+                    });
+                }
+            }
+            last_time = Some(current_ms);
         }
     }
     
@@ -808,28 +821,28 @@ async fn analyze_workflow_duration(
 
     let bytes = &index.mmap[..];
     let offsets = &index.offsets;
-    let mut segments = Vec::new();
-    
-    use std::collections::HashMap;
-    let mut active_starts_with_id: HashMap<String, (usize, f64)> = HashMap::new();
-    let mut active_starts_no_id: Vec<(usize, f64)> = Vec::new();
-    let mut last_ts = 0.0;
 
-    for idx in 0..offsets.len() {
+    // 1. 并行预处理：提取时间戳、ID和匹配标记
+    // 为了减少内存分配，我们只记录必要信息
+    #[derive(Clone)]
+    struct LineMeta {
+        line_num: usize,
+        ts: f64,
+        id: Option<String>,
+        is_start: bool,
+        is_end: bool,
+    }
+
+    let metas: Vec<LineMeta> = (0..offsets.len()).into_par_iter().map(|idx| {
         let start = offsets[idx];
         let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-        let line = String::from_utf8_lossy(&bytes[start..end]);
-        let line_num = idx + 1;
+        let line = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
         
-        if let Some(caps) = ts_re.captures(&line) {
-            if let Some(m) = caps.get(1) {
-                let ts = parse_timestamp_to_ms(m.as_str());
-                if ts > 0.0 {
-                    last_ts = ts;
-                }
-            }
-        }
-        
+        let ts = ts_re.captures(&line)
+            .and_then(|c| c.get(1))
+            .map(|m| parse_timestamp_to_ms(m.as_str()))
+            .unwrap_or(0.0);
+            
         let id = id_re.as_ref()
             .and_then(|re| re.captures(&line))
             .and_then(|c| {
@@ -840,35 +853,58 @@ async fn analyze_workflow_duration(
                 }
             });
 
-        if start_re.is_match(&line) {
-            if let Some(ref flow_id) = id {
-                active_starts_with_id.insert(flow_id.clone(), (line_num, last_ts));
+        LineMeta {
+            line_num: idx + 1,
+            ts,
+            id,
+            is_start: start_re.is_match(&line),
+            is_end: end_re.is_match(&line),
+        }
+    }).collect();
+
+    // 2. 串行匹配逻辑 (因为这涉及到状态机)
+    let mut segments = Vec::new();
+    use std::collections::HashMap;
+    let mut active_starts_with_id: HashMap<String, (usize, f64)> = HashMap::new();
+    let mut active_starts_no_id: Vec<(usize, f64)> = Vec::new();
+    let mut last_valid_ts = 0.0;
+
+    for meta in metas {
+        if meta.ts > 0.0 {
+            last_valid_ts = meta.ts;
+        }
+        
+        if meta.is_start {
+            if let Some(ref flow_id) = meta.id {
+                active_starts_with_id.insert(flow_id.clone(), (meta.line_num, last_valid_ts));
             } else {
-                active_starts_no_id.push((line_num, last_ts));
+                active_starts_no_id.push((meta.line_num, last_valid_ts));
             }
-        } else if end_re.is_match(&line) {
-            if let Some(ref flow_id) = id {
+        } 
+        
+        if meta.is_end {
+            if let Some(ref flow_id) = meta.id {
                 if let Some((s_line, s_ts)) = active_starts_with_id.remove(flow_id) {
-                    if last_ts > 0.0 && s_ts > 0.0 {
+                    if last_valid_ts > 0.0 && s_ts > 0.0 {
                         segments.push(WorkflowSegment {
                             start_line: s_line,
-                            end_line: line_num,
+                            end_line: meta.line_num,
                             start_time: s_ts,
-                            end_time: last_ts,
-                            duration_ms: last_ts - s_ts,
+                            end_time: last_valid_ts,
+                            duration_ms: last_valid_ts - s_ts,
                             id: Some(flow_id.clone()),
                         });
                     }
                 }
             } else {
                 if let Some((s_line, s_ts)) = active_starts_no_id.pop() {
-                    if last_ts > 0.0 && s_ts > 0.0 {
+                    if last_valid_ts > 0.0 && s_ts > 0.0 {
                         segments.push(WorkflowSegment {
                             start_line: s_line,
-                            end_line: line_num,
+                            end_line: meta.line_num,
                             start_time: s_ts,
-                            end_time: last_ts,
-                            duration_ms: last_ts - s_ts,
+                            end_time: last_valid_ts,
+                            duration_ms: last_valid_ts - s_ts,
                             id: None,
                         });
                     }
@@ -894,38 +930,54 @@ async fn analyze_recurrent_intervals(
 
     let bytes = &index.mmap[..];
     let offsets = &index.offsets;
-    let mut segments = Vec::new();
-    let mut last_hit: Option<(usize, f64)> = None;
-    let mut last_ts = 0.0;
 
-    for idx in 0..offsets.len() {
+    // 1. 并行预处理
+    struct Hit {
+        line_num: usize,
+        ts: f64,
+        is_hit: bool,
+    }
+
+    let hits: Vec<Hit> = (0..offsets.len()).into_par_iter().map(|idx| {
         let start = offsets[idx];
         let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-        let line = String::from_utf8_lossy(&bytes[start..end]);
-        let line_num = idx + 1;
+        let line = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
         
-        if let Some(caps) = ts_re.captures(&line) {
-            if let Some(m) = caps.get(1) {
-                let ts = parse_timestamp_to_ms(m.as_str());
-                if ts > 0.0 {
-                    last_ts = ts;
-                }
-            }
+        let ts = ts_re.captures(&line)
+            .and_then(|c| c.get(1))
+            .map(|m| parse_timestamp_to_ms(m.as_str()))
+            .unwrap_or(0.0);
+
+        Hit {
+            line_num: idx + 1,
+            ts,
+            is_hit: re.is_match(&line),
+        }
+    }).collect();
+
+    // 2. 串行计算间隔
+    let mut segments = Vec::new();
+    let mut last_hit: Option<(usize, f64)> = None;
+    let mut last_valid_ts = 0.0;
+
+    for hit in hits {
+        if hit.ts > 0.0 {
+            last_valid_ts = hit.ts;
         }
 
-        if re.is_match(&line) {
-            if last_ts > 0.0 {
+        if hit.is_hit {
+            if last_valid_ts > 0.0 {
                 if let Some((prev_line, prev_ts)) = last_hit {
                     segments.push(WorkflowSegment {
                         start_line: prev_line,
-                        end_line: line_num,
+                        end_line: hit.line_num,
                         start_time: prev_ts,
-                        end_time: last_ts,
-                        duration_ms: last_ts - prev_ts,
+                        end_time: last_valid_ts,
+                        duration_ms: last_valid_ts - prev_ts,
                         id: None,
                     });
                 }
-                last_hit = Some((line_num, last_ts));
+                last_hit = Some((hit.line_num, last_valid_ts));
             }
         }
     }

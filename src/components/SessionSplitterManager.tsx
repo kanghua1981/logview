@@ -11,9 +11,7 @@ export default function SessionSplitterManager() {
     addSessionSplitter,
     removeSessionSplitter,
     toggleSessionSplitter,
-    setActiveSessionMode,
-    setSessions,
-    setLogLines
+    setActiveSessionMode
   } = useLogStore();
 
   const [newName, setNewName] = useState('');
@@ -54,6 +52,7 @@ export default function SessionSplitterManager() {
       }
 
       // 调用后端重新解析
+      // 加载日志内容
       const result = await invoke<{
         sessions: Array<{
           id: number;
@@ -61,11 +60,8 @@ export default function SessionSplitterManager() {
           end_line: number;
           boot_marker: string;
         }>;
-        lines: Array<{
-          line_number: number;
-          content: string;
-          level?: string;
-        }>;
+        line_count: number;
+        levels: (string|null)[];
       }>('parse_log_with_custom_splitters', {
         path: currentFile.path,
         splitterRegexes: activeSessionMode === 'boot' 
@@ -74,19 +70,17 @@ export default function SessionSplitterManager() {
         levelRegex: useLogStore.getState().logLevelRegex
       });
 
-      setSessions(result.sessions.map(s => ({
-        id: s.id,
-        startLine: s.start_line,
-        endLine: s.end_line,
-        bootMarker: s.boot_marker,
-        splitType: activeSessionMode === 'boot' ? 'boot' : 'custom'
-      })));
-
-      setLogLines(result.lines.map(l => ({
-        lineNumber: l.line_number,
-        content: l.content,
-        level: l.level as any,
-      })));
+      useLogStore.getState().setParsedLog({
+        sessions: result.sessions.map(s => ({
+          id: s.id,
+          startLine: s.start_line,
+          endLine: s.end_line,
+          bootMarker: s.boot_marker,
+          splitType: activeSessionMode === 'boot' ? 'boot' : 'custom'
+        })),
+        levels: result.levels,
+        line_count: result.line_count
+      });
     } catch (error) {
       console.error('Failed to apply splitters:', error);
       alert('应用失败: ' + error);

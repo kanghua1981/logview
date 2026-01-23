@@ -8,7 +8,7 @@ export default function KeyPathTracker() {
     highlights, 
     showOnlyHighlights, 
     highlightContextLines,
-    filteredLines,
+    lineContents,
     addHighlight, 
     removeHighlight, 
     toggleHighlight, 
@@ -21,23 +21,27 @@ export default function KeyPathTracker() {
 
   const [input, setInput] = useState('');
 
-  // 计算每个关键字的出现次数和行号 (基于当前过滤后的行，确保能跳转到)
+  // 计算每个关键字的出现次数和行号 (仅基于当前缓存的行)
   const highlightStats = useMemo(() => {
     const stats: Record<string, number[]> = {};
     highlights.forEach(h => {
       stats[h.id] = [];
     });
 
-    filteredLines.forEach(line => {
-      const content = line.content.toLowerCase();
+    // 性能优化：仅统计已加载出的内容
+    lineContents.forEach((content, lineNumber) => {
+      const lowerContent = content.toLowerCase();
       highlights.forEach(h => {
-        if (content.includes(h.text.toLowerCase())) {
-          stats[h.id].push(line.lineNumber);
+        if (lowerContent.includes(h.text.toLowerCase())) {
+          stats[h.id].push(lineNumber);
         }
       });
     });
+    
+    // 对行号排序
+    Object.values(stats).forEach(arr => arr.sort((a, b) => a - b));
     return stats;
-  }, [filteredLines, highlights]);
+  }, [lineContents, highlights]);
 
   const handleAdd = () => {
     if (input.trim()) {

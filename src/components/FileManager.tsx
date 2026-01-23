@@ -9,8 +9,6 @@ export const loadLogFile = async (filePath: string) => {
     files, 
     addFile, 
     setCurrentFile, 
-    setSessions, 
-    setLogLines, 
     bootMarkerRegex, 
     logLevelRegex 
   } = useLogStore.getState();
@@ -63,29 +61,24 @@ export const loadLogFile = async (filePath: string) => {
         end_line: number;
         boot_marker: string;
       }>;
-      lines: Array<{
-        line_number: number;
-        content: string;
-        level?: string;
-      }>;
+      line_count: number;
+      levels: (string|null)[];
     }>('parse_log_content', { 
       path: filePath,
       bootRegex: bootMarkerRegex,
       levelRegex: logLevelRegex
     });
 
-    setSessions(result.sessions.map(s => ({
-      id: s.id,
-      startLine: s.start_line,
-      endLine: s.end_line,
-      bootMarker: s.boot_marker,
-    })));
-
-    setLogLines(result.lines.map(l => ({
-      lineNumber: l.line_number,
-      content: l.content,
-      level: l.level as any,
-    })));
+    useLogStore.getState().setParsedLog({
+      sessions: result.sessions.map(s => ({
+        id: s.id,
+        startLine: s.start_line,
+        endLine: s.end_line,
+        bootMarker: s.boot_marker,
+      })),
+      levels: result.levels,
+      line_count: result.line_count
+    });
 
     // 新增：打开新文件时，默认关闭“仅限所选会话”搜索
     useLogStore.setState({ 

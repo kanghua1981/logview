@@ -78,15 +78,21 @@ export interface LogMetric {
 }
 
 interface LogViewState {
-  // ... 其他状态保持不变
   files: LogFile[];
   currentFileId: string | null;
   sessions: LogSession[];
   selectedSessionIds: number[];
-  sessionSplitters: SessionSplitter[]; // 会话分割器列表
-  activeSessionMode: 'boot' | 'custom'; // 当前使用的会话模式
-  logLines: LogLine[];
-  filteredLines: LogLine[];
+  sessionSplitters: SessionSplitter[]; 
+  activeSessionMode: 'boot' | 'custom';
+  
+  // 核心数据优化：不再存储几十万个对象
+  lineLevels: (string | null)[];
+  lineCount: number;
+  // 缓存已拉取内容的文件行 (只有可见区域才会有 content)
+  lineContents: Map<number, string>;
+  
+  filteredIndices: number[]; // 存储过滤后的行号索引（0-based）
+  
   profiles: LogProfile[];
   activeProfileId: string;
   bootMarkerRegex: string;
@@ -130,6 +136,9 @@ interface LogViewState {
   setSessions: (sessions: LogSession[]) => void;
   setSelectedSessions: (ids: number[]) => void;
   
+  // 新的高性能加载 Action
+  setParsedLog: (parsed: { sessions: LogSession[], levels: (string|null)[], line_count: number }) => void;
+  
   // 会话分割器管理
   addSessionSplitter: (name: string, regex: string, isRegex: boolean) => void;
   removeSessionSplitter: (id: string) => void;
@@ -137,7 +146,6 @@ interface LogViewState {
   updateSessionSplitter: (id: string, regex: string) => void;
   setActiveSessionMode: (mode: 'boot' | 'custom') => void;
   applySessionSplitters: () => Promise<void>;
-  setLogLines: (lines: LogLine[]) => void;
   setTimestampRegex: (regex: string) => void;
   setBootMarkerRegex: (regex: string) => void;
   setLogLevelRegex: (regex: string) => void;
@@ -181,6 +189,7 @@ interface LogViewState {
   exportHighlights: () => string;
   importHighlights: (json: string) => boolean;
 
+  updateLogLinesContent: (updatedLines: LogLine[]) => void;
   filterLogLines: () => void;
 }
 
@@ -191,8 +200,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   selectedSessionIds: [],
   sessionSplitters: JSON.parse(localStorage.getItem('session_splitters') || '[]'),
   activeSessionMode: (localStorage.getItem('active_session_mode') as 'boot' | 'custom') || 'boot',
-  logLines: [],
-  filteredLines: [],
+  lineLevels: [],
+  lineCount: 0,
+  lineContents: new Map(),
+  filteredIndices: [],
   profiles: JSON.parse(localStorage.getItem('log_profiles') || JSON.stringify(DEFAULT_PROFILES)),
   activeProfileId: localStorage.getItem('active_profile_id') || 'default',
   bootMarkerRegex: '',
@@ -239,8 +250,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     return {
       files: state.files.filter(f => f.id !== id),
       currentFileId: isCurrent ? null : state.currentFileId,
-      logLines: isCurrent ? [] : state.logLines,
-      filteredLines: isCurrent ? [] : state.filteredLines,
+      lineLevels: isCurrent ? [] : state.lineLevels,
+      lineCount: isCurrent ? 0 : state.lineCount,
+      lineContents: isCurrent ? new Map() : state.lineContents,
+      filteredIndices: isCurrent ? [] : state.filteredIndices,
       sessions: isCurrent ? [] : state.sessions,
       selectedSessionIds: isCurrent ? [] : state.selectedSessionIds,
       metrics: isCurrent ? state.metrics.map(m => ({ ...m, data: [] })) : state.metrics,
@@ -255,8 +268,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   
   setCurrentFile: (id) => set((state) => ({ 
     currentFileId: id,
-    logLines: [],
-    filteredLines: [],
+    lineLevels: [],
+    lineCount: 0,
+    lineContents: new Map(),
+    filteredIndices: [],
     sessions: [],
     selectedSessionIds: [],
     metrics: state.metrics.map(m => ({ ...m, data: [] })),
@@ -275,10 +290,17 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       get().performSearch();
     }
   },
-  setLogLines: (lines) => {
-    set({ logLines: lines });
+  
+  setParsedLog: (parsed) => {
+    set({ 
+      sessions: parsed.sessions, 
+      lineLevels: parsed.levels, 
+      lineCount: parsed.line_count,
+      lineContents: new Map()
+    });
     get().filterLogLines();
   },
+
   setTimestampRegex: (regex) => set({ timestampRegex: regex }),
   setBootMarkerRegex: (regex) => set({ bootMarkerRegex: regex }),
   setLogLevelRegex: (regex) => set({ logLevelRegex: regex }),
@@ -287,27 +309,14 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     get().filterLogLines();
   },
 
-  updateLogLinesContent: (updatedLines: LogLine[]) => {
-    const { logLines } = get();
-    // 这是一个非常高频的操作，我们直接修改 logLines 引用可能更高效，或者使用映射处理
-    // 为了 React 不重新渲染不相关的行，这里我们要确保逻辑正确
-    const lineMap = new Map(updatedLines.map(l => [l.lineNumber, l.content]));
-    
-    set(state => ({
-      logLines: state.logLines.map(line => {
-        if (lineMap.has(line.lineNumber)) {
-          return { ...line, content: lineMap.get(line.lineNumber)! };
-        }
-        return line;
-      }),
-      // 同时更新 filteredLines 以便视图层看到变化
-      filteredLines: state.filteredLines.map(line => {
-        if (lineMap.has(line.lineNumber)) {
-          return { ...line, content: lineMap.get(line.lineNumber)! };
-        }
-        return line;
-      })
-    }));
+  updateLogLinesContent: (updatedLines) => {
+    set(state => {
+      const newContents = new Map(state.lineContents);
+      updatedLines.forEach(l => {
+        newContents.set(l.lineNumber, l.content);
+      });
+      return { lineContents: newContents };
+    });
   },
 
   addHighlight: (text) => set((state) => {
@@ -593,56 +602,46 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   },
   
   filterLogLines: () => {
-    const { logLines, logLevelFilter, selectedSessionIds, sessions, highlights, showOnlyHighlights } = get();
-    let filtered = logLines;
-
-    if (selectedSessionIds.length > 0) {
-      filtered = filtered.filter(line => {
-        return selectedSessionIds.some(sessionId => {
-          const session = sessions.find(s => s.id === sessionId);
-          if (!session) return false;
-          return line.lineNumber >= session.startLine && 
-                 line.lineNumber <= session.endLine;
-        });
-      });
-    }
-
-    if (showOnlyHighlights && highlights.some(h => h.enabled)) {
-      const activeHighlights = highlights.filter(h => h.enabled);
-      const contextLines = get().highlightContextLines;
-      
-      if (contextLines <= 0) {
-        filtered = filtered.filter(line => 
-          activeHighlights.some(h => line.content.toLowerCase().includes(h.text.toLowerCase()))
-        );
-      } else {
-        const matchingLineNumbers = filtered
-          .filter(line => activeHighlights.some(h => line.content.toLowerCase().includes(h.text.toLowerCase())))
-          .map(line => line.lineNumber);
-        
-        const contextLineNumbers = new Set<number>();
-        matchingLineNumbers.forEach(ln => {
-          for (let i = ln - contextLines; i <= ln + contextLines; i++) {
-            if (i > 0) contextLineNumbers.add(i);
-          }
-        });
-        
-        filtered = filtered.filter(line => contextLineNumbers.has(line.lineNumber));
-      }
-    }
+    const { lineCount, lineLevels, logLevelFilter, selectedSessionIds, sessions, highlights, showOnlyHighlights } = get();
     
-    if (logLevelFilter.length > 0) {
-      filtered = filtered.filter(line => {
-        if (!line.level) return true;
+    // 1. 基础范围：会话过滤
+    let indices: number[] = [];
+    if (selectedSessionIds.length > 0) {
+      const selectedRanges = selectedSessionIds.map(id => {
+        const s = sessions.find(sess => sess.id === id);
+        return s ? [s.startLine - 1, s.endLine - 1] : null;
+      }).filter(Boolean) as [number, number][];
+      
+      for (const [start, end] of selectedRanges) {
+        for (let i = start; i <= end; i++) {
+          indices.push(i);
+        }
+      }
+    } else {
+      indices = Array.from({ length: lineCount }, (_, i) => i);
+    }
+
+    // 2. 日志级别过滤
+    if (logLevelFilter.length > 0 && lineLevels.length > 0) {
+      indices = indices.filter(idx => {
+        const lv = lineLevels[idx];
+        if (!lv) return true;
         const standardLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
-        if (standardLevels.includes(line.level)) {
-          return logLevelFilter.includes(line.level);
+        if (standardLevels.includes(lv.toUpperCase())) {
+          return logLevelFilter.includes(lv.toUpperCase());
         }
         return true;
       });
     }
+
+    // 3. 高亮过滤 (暂不实现 ContextLines 逻辑以保持性能，后续按需添加)
+    if (showOnlyHighlights && highlights.some(h => h.enabled)) {
+      // 注意：由于我们不存储全文在内存，高亮过滤可能需要后端支持
+      // 这里暂时只做占位，或者提示用户该功能在大规模日志下受限
+      console.warn('High-scale highlight filtering is currently limited');
+    }
     
-    set({ filteredLines: filtered });
+    set({ filteredIndices: indices });
   },
 }));
 

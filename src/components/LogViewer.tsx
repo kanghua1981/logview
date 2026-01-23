@@ -6,7 +6,9 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 
 export default function LogViewer() {
-  const filteredLines = useLogStore((state) => state.filteredLines);
+  const filteredIndices = useLogStore((state) => state.filteredIndices);
+  const lineLevels = useLogStore((state) => state.lineLevels);
+  const lineContents = useLogStore((state) => state.lineContents);
   const highlights = useLogStore((state) => state.highlights);
   const scrollTargetLine = useLogStore((state) => state.scrollTargetLine);
   const fontSize = useLogStore((state) => state.fontSize);
@@ -18,20 +20,18 @@ export default function LogViewer() {
   const [isDragging, setIsDragging] = useState(false);
   const lastUpdateRef = useRef(0);
   const isProgrammaticScroll = useRef(false);
-  const fetchTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const fetchTimeoutRef = useRef<any>(null);
   const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
 
   // 辅助函数：计算时间差
-  const calculateTimeDelta = (current: any, previous: any) => {
-    if (!previous || !current) return null;
+  const calculateTimeDelta = (currentContent: string, previousContent: string) => {
+    if (!previousContent || !currentContent) return null;
     
     const extractTs = (content: string) => {
       const re = new RegExp(timestampRegex);
       const match = content.match(re);
       if (match) {
-        // 尝试从捕获组中提取，如果没有捕获组则取匹配项
         const tsStr = match[1] || match[0];
-        // 简单处理常见的 [HH:MM:SS.mmm] 或 HH:MM:SS.mmm
         const timeMatch = tsStr.match(/(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?/);
         if (timeMatch) {
           const [_, h, m, s, ms] = timeMatch;
@@ -41,8 +41,8 @@ export default function LogViewer() {
       return null;
     };
 
-    const curTs = extractTs(current.content);
-    const prevTs = extractTs(previous.content);
+    const curTs = extractTs(currentContent);
+    const prevTs = extractTs(previousContent);
     
     if (curTs !== null && prevTs !== null) {
       return curTs - prevTs;
@@ -51,7 +51,7 @@ export default function LogViewer() {
   };
 
   // 辅助函数：根据日志级别渲染背景色
-  const getLevelColor = (level?: string) => {
+  const getLevelColor = (level?: string | null) => {
     switch (level?.toUpperCase()) {
       case 'ERROR': return 'bg-red-500/10 text-red-100 hover:bg-red-500/20';
       case 'WARN': return 'bg-yellow-500/10 text-yellow-100 hover:bg-yellow-500/20';
@@ -100,9 +100,9 @@ export default function LogViewer() {
 
   // 监听跳转请求
   useEffect(() => {
-    if (scrollTargetLine !== null && filteredLines.length > 0) {
+    if (scrollTargetLine !== null && filteredIndices.length > 0) {
       // 找到行号对应的列表索引
-      const index = filteredLines.findIndex(l => l.lineNumber === scrollTargetLine);
+      const index = filteredIndices.findIndex(lineIdx => (lineIdx + 1) === scrollTargetLine);
       if (index !== -1) {
         isProgrammaticScroll.current = true;
         virtuosoRef.current?.scrollToIndex({
@@ -111,26 +111,25 @@ export default function LogViewer() {
           behavior: 'auto'
         });
         
-        // 跳转后清除目标行，防止重新渲染时重复跳转
-        // 但保留 flashLine 以维持高亮
         setTimeout(() => {
           useLogStore.setState({ scrollTargetLine: null });
         }, 100);
       }
     }
-  }, [scrollTargetLine, filteredLines.length]);
+  }, [scrollTargetLine, filteredIndices.length]);
 
   // 高性能延迟加载逻辑
   const fetchLinesData = async (startIndex: number, endIndex: number) => {
-    if (filteredLines.length === 0) return;
+    if (filteredIndices.length === 0) return;
     
     // 检查这个范围内是否已经有内容
-    const needsFetch = filteredLines.slice(startIndex, endIndex + 1).some(l => !l.content);
+    const slice = filteredIndices.slice(startIndex, endIndex + 1);
+    const needsFetch = slice.some(idx => !lineContents.has(idx + 1));
     if (!needsFetch) return;
 
     // 向前向后多预加载一些
-    const startLine = filteredLines[Math.max(0, startIndex - 50)].lineNumber;
-    const endLine = filteredLines[Math.min(filteredLines.length - 1, endIndex + 50)].lineNumber;
+    const startLine = filteredIndices[Math.max(0, startIndex - 50)] + 1;
+    const endLine = filteredIndices[Math.min(filteredIndices.length - 1, endIndex + 50)] + 1;
 
     try {
       const result = await invoke<Array<{
@@ -143,10 +142,11 @@ export default function LogViewer() {
       });
 
       if (result && result.length > 0) {
+        // 修复字段映射：将 line_number 转换为 lineNumber 以匹配 store 中的期望格式
         useLogStore.getState().updateLogLinesContent(result.map(l => ({
           lineNumber: l.line_number,
           content: l.content,
-          level: l.level as any,
+          level: l.level
         })));
       }
     } catch (error) {
@@ -158,14 +158,14 @@ export default function LogViewer() {
     rangeRef.current = range;
 
     // 1. 更新当前可见行（用于同步其他面板）
-    if (filteredLines.length > 0) {
+    if (filteredIndices.length > 0) {
       const midIndex = Math.floor((range.startIndex + range.endIndex) / 2);
-      const safeIndex = Math.min(Math.max(0, midIndex), filteredLines.length - 1);
-      const line = filteredLines[safeIndex];
-      if (line) {
+      const safeIndex = Math.min(Math.max(0, midIndex), filteredIndices.length - 1);
+      const lineIdx = filteredIndices[safeIndex];
+      if (lineIdx !== undefined) {
         const now = Date.now();
         if (now - lastUpdateRef.current > 100) {
-          useLogStore.getState().setCurrentVisibleLine(line.lineNumber);
+          useLogStore.getState().setCurrentVisibleLine(lineIdx + 1);
           lastUpdateRef.current = now;
         }
       }
@@ -205,7 +205,7 @@ export default function LogViewer() {
           </div>
         </div>
       )}
-      {filteredLines.length === 0 ? (
+      {filteredIndices.length === 0 ? (
         <div className="h-full w-full flex items-center justify-center text-gray-500">
           <div className="text-center">
             <p className="text-xl mb-2">暂无日志</p>
@@ -217,17 +217,25 @@ export default function LogViewer() {
           <Virtuoso
             ref={virtuosoRef}
             style={{ height: '100%', width: '100%' }}
-            totalCount={filteredLines.length}
+            totalCount={filteredIndices.length}
             rangeChanged={handleRangeChanged}
             itemContent={(index) => {
-              const line = filteredLines[index];
-              const prevLine = index > 0 ? filteredLines[index - 1] : null;
-              const timeDelta = showOnlyHighlights ? calculateTimeDelta(line, prevLine) : null;
+              const lineIdx = filteredIndices[index];
+              const lineNumber = lineIdx + 1;
+              const level = lineLevels[lineIdx];
+              const content = lineContents.get(lineNumber) || "";
+
+              const prevLineIdx = index > 0 ? filteredIndices[index - 1] : null;
+              const prevContent = prevLineIdx !== null ? lineContents.get(prevLineIdx + 1) : null;
+              
+              const timeDelta = (showOnlyHighlights && content && prevContent) 
+                ? calculateTimeDelta(content, prevContent) 
+                : null;
 
               const activeHighlight = highlights.find(h => 
-                h.enabled && line.content.toLowerCase().includes(h.text.toLowerCase())
+                h.enabled && content && content.toLowerCase().includes(h.text.toLowerCase())
               );
-              const isTargeted = line.lineNumber === highlightedLine;
+              const isTargeted = lineNumber === highlightedLine;
 
               return (
                 <div>
@@ -241,35 +249,35 @@ export default function LogViewer() {
                     </div>
                   )}
                   <div 
-                    className={`px-4 py-0.5 font-mono border-b border-gray-800/50 hover:bg-gray-800 flex items-start transition-all duration-300 ${getLevelColor(line.level)} ${isTargeted ? 'bg-yellow-500/30' : ''}`}
-                  style={{
-                    fontSize: `${fontSize}px`,
-                    ...(activeHighlight ? { 
-                      backgroundColor: isTargeted ? 'rgba(234, 179, 8, 0.4)' : `${activeHighlight.color}20`,
-                      borderLeft: `4px solid ${isTargeted ? '#eab308' : activeHighlight.color}`
-                    } : isTargeted ? {
-                      borderLeft: '4px solid #eab308'
-                    } : {})
-                  }}
-                >
-                  <span className="text-gray-500 mr-4 shrink-0 w-12 text-right select-none opacity-50" style={{ fontSize: `${Math.max(10, fontSize - 2)}px` }}>
-                    {line.lineNumber}
-                  </span>
-                  {line.level && (
-                    <span 
-                      className={`mr-2 px-1 rounded-[3px] font-bold shrink-0 mt-0.5 ${getLevelBadgeColor(line.level)}`}
-                      style={{ fontSize: `${Math.max(8, fontSize - 4)}px` }}
-                    >
-                      {line.level}
+                    className={`px-4 py-0.5 font-mono border-b border-gray-800/50 hover:bg-gray-800 flex items-start transition-all duration-300 ${getLevelColor(level)} ${isTargeted ? 'bg-yellow-500/30' : ''}`}
+                    style={{
+                      fontSize: `${fontSize}px`,
+                      ...(activeHighlight ? { 
+                        backgroundColor: isTargeted ? 'rgba(234, 179, 8, 0.4)' : `${activeHighlight.color}20`,
+                        borderLeft: `4px solid ${isTargeted ? '#eab308' : activeHighlight.color}`
+                      } : isTargeted ? {
+                        borderLeft: '4px solid #eab308'
+                      } : {})
+                    }}
+                  >
+                    <span className="text-gray-500 mr-4 shrink-0 w-12 text-right select-none opacity-50" style={{ fontSize: `${Math.max(10, fontSize - 2)}px` }}>
+                      {lineNumber}
                     </span>
-                  )}
-                  <span className={`whitespace-pre-wrap break-all ${activeHighlight ? 'font-bold' : ''}`}
-                        style={activeHighlight ? { color: activeHighlight.color } : {}}>
-                    {line.content || <span className="text-gray-700 italic">加载中...</span>}
-                  </span>
+                    {level && (
+                      <span 
+                        className={`mr-2 px-1 rounded-[3px] font-bold shrink-0 mt-0.5 ${getLevelBadgeColor(level)}`}
+                        style={{ fontSize: `${Math.max(8, fontSize - 4)}px` }}
+                      >
+                        {level}
+                      </span>
+                    )}
+                    <span className={`whitespace-pre-wrap break-all ${activeHighlight ? 'font-bold' : ''}`}
+                          style={activeHighlight ? { color: activeHighlight.color } : {}}>
+                      {content || <span className="text-gray-700 italic">加载中...</span>}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            );
+              );
             }}
           />
         </div>
