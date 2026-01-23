@@ -1,6 +1,6 @@
 use std::fs;
 use std::path::Path;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, Emitter, State};
 use memmap2::Mmap;
@@ -36,11 +36,37 @@ pub struct ParsedLog {
     lines: Vec<LogLine>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FileEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+}
+
+fn bytes_to_string_with_encoding(bytes: &[u8], encoding: FileEncoding) -> String {
+    match encoding {
+        FileEncoding::Utf8 => String::from_utf8_lossy(bytes).to_string(),
+        FileEncoding::Utf16Le => {
+            let u16_data: Vec<u16> = bytes.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16_data)
+        },
+        FileEncoding::Utf16Be => {
+            let u16_data: Vec<u16> = bytes.chunks_exact(2)
+                .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                .collect();
+            String::from_utf16_lossy(&u16_data)
+        }
+    }
+}
+
 // 核心索引结构
 pub struct LogIndex {
     mmap: Mmap,
     offsets: Vec<usize>, // 每行起始位置的字节偏移
     levels: Vec<Option<String>>, // 每行的日志级别（预处理）
+    encoding: FileEncoding,
 }
 
 #[derive(Default)]
@@ -67,31 +93,75 @@ async fn parse_log_file(
 ) -> Result<FileInfo, String> {
     let file = fs::File::open(&path).map_err(|e| e.to_string())?;
     let mmap = unsafe { Mmap::map(&file).map_err(|e| e.to_string())? };
+    let bytes = &mmap[..];
+
+    // 0. 编码检测 (BOM)
+    let (encoding, start_offset) = if bytes.starts_with(&[0xff, 0xfe]) {
+        (FileEncoding::Utf16Le, 2)
+    } else if bytes.starts_with(&[0xfe, 0xff]) {
+        (FileEncoding::Utf16Be, 2)
+    } else if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        (FileEncoding::Utf8, 3)
+    } else {
+        (FileEncoding::Utf8, 0)
+    };
     
     // 1. 并行寻找换行符，记录每行起始偏移
-    // 我们寻找所有的 \n 索引
-    let mut offsets = vec![0]; // 第一行起始位置是 0
-    let bytes = &mmap[..];
+    let mut offsets = vec![start_offset]; 
     
-    // 使用 rayon 并流并行寻找换行符偏移
-    // 这个操作在 100MB 文件上通常只需几十毫秒
-    let mut newline_offsets: Vec<usize> = bytes.par_iter().enumerate()
-        .filter(|&(_, &b)| b == b'\n')
-        .map(|(idx, _)| idx + 1)
-        .collect();
+    let mut newline_offsets: Vec<usize> = match encoding {
+        FileEncoding::Utf16Le => {
+            // UTF-16 LE: 寻找 0x0A 并且确认它是偶数索引（相对于 start_offset）
+            (start_offset..bytes.len()).into_par_iter()
+                .filter(|&idx| bytes[idx] == 0x0A && (idx - start_offset) % 2 == 0)
+                .map(|idx| idx + 2) // \n\0 后面的位置
+                .collect()
+        }
+        FileEncoding::Utf16Be => {
+            // UTF-16 BE: 寻找 0x0A 并且确认它是奇数索引
+            (start_offset..bytes.len()).into_par_iter()
+                .filter(|&idx| bytes[idx] == 0x0A && (idx - start_offset) % 2 == 1)
+                .map(|idx| idx + 1)
+                .collect()
+        }
+        _ => {
+            // UTF-8
+            (start_offset..bytes.len()).into_par_iter()
+                .filter(|&idx| bytes[idx] == b'\n')
+                .map(|idx| idx + 1)
+                .collect()
+        }
+    };
     
-    // 确保偏移是有序的
     newline_offsets.sort_unstable();
     offsets.extend(newline_offsets);
 
-    // 如果最后一行没有换行符结束，可能需要处理（此处简化处理）
     if offsets.last() == Some(&bytes.len()) {
         offsets.pop(); 
     }
 
     let line_count = offsets.len();
     
-    // 2. 预分析：并行提取日志级别和会话分割
+    // Helper to convert bytes to string based on detected encoding
+    let bytes_to_str = |b: &[u8]| -> String {
+        match encoding {
+            FileEncoding::Utf8 => String::from_utf8_lossy(b).to_string(),
+            FileEncoding::Utf16Le => {
+                let u16_data: Vec<u16> = b.chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&u16_data)
+            },
+            FileEncoding::Utf16Be => {
+                let u16_data: Vec<u16> = b.chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&u16_data)
+            }
+        }
+    };
+
+    // 2. 预分析：并行提取日志级别
     let level_re = if !level_regex.is_empty() {
         Regex::new(&level_regex).ok()
     } else {
@@ -109,7 +179,7 @@ async fn parse_log_file(
         let start = offsets[idx];
         let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
         let line_bytes = &bytes[start..end];
-        let line_str = String::from_utf8_lossy(line_bytes);
+        let line_str = bytes_to_str(line_bytes);
         
         level_re.as_ref().and_then(|re| {
             re.captures(&line_str).and_then(|cap| {
@@ -123,12 +193,18 @@ async fn parse_log_file(
     }).collect();
 
     // 3. 计算会话数
+    let boot_re = if !boot_regex.is_empty() {
+        Regex::new(&boot_regex).ok()
+    } else {
+        Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").ok()
+    };
+
     let sessions_count = if let Some(re) = boot_re {
         (0..line_count).into_par_iter().filter(|&idx| {
             let start = offsets[idx];
             let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
             let line_bytes = &bytes[start..end];
-            let line_str = String::from_utf8_lossy(line_bytes);
+            let line_str = bytes_to_str(line_bytes);
             re.is_match(&line_str)
         }).count() + 1
     } else {
@@ -142,6 +218,7 @@ async fn parse_log_file(
         mmap,
         offsets,
         levels,
+        encoding,
     });
     
     let mut current = state.current_index.lock().unwrap();
@@ -192,7 +269,7 @@ async fn parse_log_content(
             if let Some(ref re) = boot_re {
                 let start = index.offsets[idx];
                 let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
-                let line_str = String::from_utf8_lossy(&bytes[start..end]);
+                let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
                 
                 if re.is_match(&line_str) && idx > 0 {
                     sessions.push(LogSession {
@@ -276,7 +353,7 @@ async fn parse_log_with_custom_splitters(
     for idx in 0..line_count {
         let start = index.offsets[idx];
         let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
-        let line_str = String::from_utf8_lossy(&bytes[start..end]);
+        let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
         
         let mut is_match = false;
         for re in &compiled_splitters {
@@ -343,7 +420,7 @@ async fn get_log_range(
         let result: Vec<LogLine> = (start_idx..end_idx).into_par_iter().map(|idx| {
             let start = index.offsets[idx];
             let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
-            let line_content = String::from_utf8_lossy(&bytes[start..end]).to_string();
+            let line_content = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
             
             LogLine {
                 line_number: idx + 1,
@@ -494,30 +571,68 @@ async fn search_log(
     let bytes = &index.mmap[..];
     let offsets = &index.offsets;
 
+    let trimmed_query = query.trim_matches(|c: char| c == '\r' || c == '\n');
+
+    if trimmed_query.is_empty() {
+        return Ok(vec![]);
+    }
+
     let search_fn: Box<dyn Fn(&str) -> bool + Send + Sync> = if is_regex {
-        let re = Regex::new(&query).map_err(|e| e.to_string())?;
+        let re = RegexBuilder::new(trimmed_query)
+            .case_insensitive(true)
+            .build()
+            .map_err(|e| e.to_string())?;
         Box::new(move |s| re.is_match(s))
     } else {
-        let q = query.to_lowercase();
+        let q = trimmed_query.to_lowercase();
         Box::new(move |s| s.to_lowercase().contains(&q))
     };
 
-    // 如果指定了范围，只在范围内搜索
     let result: Vec<LogLine> = if let Some(ranges) = line_ranges {
+        if ranges.is_empty() {
+            return Ok(vec![]);
+        }
         // 将范围转换为索引
         ranges.into_par_iter().flat_map(|(start, end)| {
             let start_idx = (start.max(1) - 1).min(offsets.len());
             let end_idx = end.min(offsets.len());
             
-            (start_idx..end_idx).into_par_iter().filter_map(|idx| {
+            if start_idx >= end_idx {
+                return vec![];
+            }
+
+            (start_idx..end_idx).into_iter().filter_map(|idx| {
                 let start_pos = offsets[idx];
-                let end_pos = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-                let line_str = String::from_utf8_lossy(&bytes[start_pos..end_pos]);
+                let next_start = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+                
+                // 掐掉换行符 (编码相关的)
+                let mut end_pos = next_start;
+                match index.encoding {
+                    FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+                        while end_pos >= start_pos + 2 {
+                            let b1 = bytes[end_pos - 2];
+                            let b2 = bytes[end_pos - 1];
+                            if (index.encoding == FileEncoding::Utf16Le && (b1 == 0x0A || b1 == 0x0D) && b2 == 0x00) ||
+                               (index.encoding == FileEncoding::Utf16Be && b1 == 0x00 && (b2 == 0x0A || b2 == 0x0D)) {
+                                end_pos -= 2;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        while end_pos > start_pos && (bytes[end_pos-1] == b'\n' || bytes[end_pos-1] == b'\r') {
+                            end_pos -= 1;
+                        }
+                    }
+                }
+                
+                let line_str = bytes_to_string_with_encoding(&bytes[start_pos..end_pos], index.encoding);
                 
                 if search_fn(&line_str) {
                     Some(LogLine {
                         line_number: idx + 1,
-                        content: line_str.to_string(),
+                        content: line_str,
                         level: index.levels[idx].clone(),
                     })
                 } else {
@@ -530,14 +645,36 @@ async fn search_log(
         (0..offsets.len())
             .into_par_iter()
             .filter_map(|idx| {
-                let start = offsets[idx];
-                let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-                let line_str = String::from_utf8_lossy(&bytes[start..end]);
+                let start_pos = offsets[idx];
+                let next_start = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+                
+                let mut end_pos = next_start;
+                match index.encoding {
+                    FileEncoding::Utf16Le | FileEncoding::Utf16Be => {
+                        while end_pos >= start_pos + 2 {
+                            let b1 = bytes[end_pos - 2];
+                            let b2 = bytes[end_pos - 1];
+                            if (index.encoding == FileEncoding::Utf16Le && (b1 == 0x0A || b1 == 0x0D) && b2 == 0x00) ||
+                               (index.encoding == FileEncoding::Utf16Be && b1 == 0x00 && (b2 == 0x0A || b2 == 0x0D)) {
+                                end_pos -= 2;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    _ => {
+                        while end_pos > start_pos && (bytes[end_pos-1] == b'\n' || bytes[end_pos-1] == b'\r') {
+                            end_pos -= 1;
+                        }
+                    }
+                }
+
+                let line_str = bytes_to_string_with_encoding(&bytes[start_pos..end_pos], index.encoding);
                 
                 if search_fn(&line_str) {
                     Some(LogLine {
                         line_number: idx + 1,
-                        content: line_str.to_string(),
+                        content: line_str,
                         level: index.levels[idx].clone(),
                     })
                 } else {
@@ -613,7 +750,7 @@ async fn analyze_time_gaps(timestamp_regex: String, state: State<'_, AppState>) 
     for idx in 0..offsets.len() {
         let start = offsets[idx];
         let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
-        let line = String::from_utf8_lossy(&bytes[start..end]);
+        let line = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
 
         if let Some(caps) = re.captures(&line) {
             let ts_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");

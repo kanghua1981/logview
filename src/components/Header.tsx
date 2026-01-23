@@ -2,18 +2,16 @@ import { useRef, useEffect, useState } from 'react';
 import { useLogStore } from '../store';
 
 export default function Header() {
-  const { 
-    searchQuery, 
-    setSearchQuery, 
-    performSearch, 
-    currentFileId, 
-    files,
-    searchOnlySelectedSessions,
-    setSearchOnlySelectedSessions,
-    selectedSessionIds,
-    isSearchRegex,
-    setSearchRegex
-  } = useLogStore();
+  const searchQuery = useLogStore((state) => state.searchQuery);
+  const setSearchQuery = useLogStore((state) => state.setSearchQuery);
+  const performSearch = useLogStore((state) => state.performSearch);
+  const currentFileId = useLogStore((state) => state.currentFileId);
+  const files = useLogStore((state) => state.files);
+  const searchOnlySelectedSessions = useLogStore((state) => state.searchOnlySelectedSessions);
+  const setSearchOnlySelectedSessions = useLogStore((state) => state.setSearchOnlySelectedSessions);
+  const selectedSessionIds = useLogStore((state) => state.selectedSessionIds);
+  const isSearchRegex = useLogStore((state) => state.isSearchRegex);
+  const setSearchRegex = useLogStore((state) => state.setSearchRegex);
   
   const currentFile = files.find(f => f.id === currentFileId);
   const inputRef = useRef<HTMLInputElement>(null);

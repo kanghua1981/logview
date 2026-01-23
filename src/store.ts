@@ -404,9 +404,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     }
     
     try {
-      // 如果开启了“仅限选中会话”，计算范围
+      // 计算搜索范围
       let lineRanges = null;
       if (searchOnlySelectedSessions && selectedSessionIds.length > 0) {
+        // 只有在选边了会话的情况下才应用范围限制
         lineRanges = selectedSessionIds.map(id => {
           const s = sessions.find(sess => sess.id === id);
           return s ? [s.startLine, s.endLine] : null;
@@ -414,7 +415,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       }
 
       const results = await invoke<any[]>('search_log', {
-        query: searchQuery,
+        query: searchQuery, // 不再在前端 trim，改由后端精确处理换行符
         isRegex: isSearchRegex,
         lineRanges
       });

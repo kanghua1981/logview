@@ -2,18 +2,16 @@ import { useLogStore, LogLine } from '../store';
 import { Virtuoso } from 'react-virtuoso';
 
 export default function SearchResultsPanel() {
-  const { 
-    searchResults, 
-    searchQuery, 
-    isSearchPanelOpen, 
-    setSearchPanelOpen, 
-    setScrollTargetLine,
-    setActiveView,
-    fontSize,
-    searchOnlySelectedSessions,
-    selectedSessionIds,
-    isSearchRegex
-  } = useLogStore();
+  const searchResults = useLogStore((state) => state.searchResults);
+  const searchQuery = useLogStore((state) => state.searchQuery);
+  const isSearchPanelOpen = useLogStore((state) => state.isSearchPanelOpen);
+  const setSearchPanelOpen = useLogStore((state) => state.setSearchPanelOpen);
+  const setScrollTargetLine = useLogStore((state) => state.setScrollTargetLine);
+  const setActiveView = useLogStore((state) => state.setActiveView);
+  const fontSize = useLogStore((state) => state.fontSize);
+  const searchOnlySelectedSessions = useLogStore((state) => state.searchOnlySelectedSessions);
+  const selectedSessionIds = useLogStore((state) => state.selectedSessionIds);
+  const isSearchRegex = useLogStore((state) => state.isSearchRegex);
 
   if (!isSearchPanelOpen) return null;
 
@@ -48,9 +46,16 @@ export default function SearchResultsPanel() {
             搜索结果: <span className="text-blue-400">"{searchQuery}"</span>
           </span>
           {searchOnlySelectedSessions && (
-            <span className="px-2 py-0.5 bg-blue-900/40 text-blue-400 text-[10px] rounded border border-blue-800/50">
-              范围: 已选会话 ({selectedSessionIds.length})
-            </span>
+            selectedSessionIds.length > 0 ? (
+              <span className="px-2 py-0.5 bg-blue-900/40 text-blue-400 text-[10px] rounded border border-blue-800/50">
+                范围: 已选会话 ({selectedSessionIds.length})
+              </span>
+            ) : (
+              <span className="px-2 py-0.5 bg-yellow-900/20 text-yellow-500 text-[10px] rounded border border-yellow-800/30 flex items-center space-x-1">
+                <span>⚠️</span>
+                <span>未选会话，正在全局搜索</span>
+              </span>
+            )
           )}
           <span className="text-xs text-gray-500">
             共找到 {searchResults.length} 处匹配

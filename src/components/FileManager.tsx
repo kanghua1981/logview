@@ -86,6 +86,12 @@ export const loadLogFile = async (filePath: string) => {
       content: l.content,
       level: l.level as any,
     })));
+
+    // 新增：打开新文件时，默认关闭“仅限所选会话”搜索
+    useLogStore.setState({ 
+      searchOnlySelectedSessions: false,
+      selectedSessionIds: [] 
+    });
   } catch (error) {
     console.error('Failed to load file:', error);
     throw error;
