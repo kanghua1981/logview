@@ -156,15 +156,16 @@ export default function ConfigPanel() {
       </div>
 
       {/* 预设管理 */}
-      <div>
-        <h3 className="text-sm font-semibold text-gray-400 mb-3">预设模式</h3>
+      <div className="bg-gray-900/40 p-3 rounded-lg border border-gray-800">
+        <h3 className="text-xs font-bold text-gray-500 mb-3 uppercase tracking-widest">预设方案切换</h3>
         <select 
           value={activeProfileId}
           onChange={(e) => setActiveProfile(e.target.value)}
-          className="w-full px-3 py-2 bg-gray-800 text-white rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm mb-2"
+          className="w-full px-3 py-2 bg-gray-950 text-blue-400 rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm mb-3 appearance-none cursor-pointer"
+          style={{ backgroundImage: 'linear-gradient(45deg, transparent 50%, #6b7280 50%), linear-gradient(135deg, #6b7280 50%, transparent 50%)', backgroundPosition: 'calc(100% - 20px) calc(1em + 2px), calc(100% - 15px) calc(1em + 2px)', backgroundSize: '5px 5px, 5px 5px', backgroundRepeat: 'no-repeat' }}
         >
           {profiles.map(p => (
-            <option key={p.id} value={p.id}>{p.name}</option>
+            <option key={p.id} value={p.id} className="bg-gray-900 text-white">{p.name}</option>
           ))}
         </select>
         
@@ -173,19 +174,19 @@ export default function ConfigPanel() {
             type="text"
             value={profileName}
             onChange={(e) => setProfileName(e.target.value)}
-            placeholder="预设名称..."
-            className="flex-1 px-3 py-1 bg-gray-800 text-white rounded border border-gray-700 focus:border-blue-500 focus:outline-none text-xs"
+            placeholder="为当前配置起个名字..."
+            className="flex-1 px-3 py-1.5 bg-gray-950 text-white placeholder-gray-600 rounded border border-gray-700 focus:border-blue-500 focus:outline-none text-xs transition-all"
           />
           <button
             onClick={handleSaveProfile}
-            className="px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded text-xs transition-colors"
+            className="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs font-bold transition-all shadow-lg shadow-blue-900/20"
           >
             保存
           </button>
           {activeProfileId !== 'default' && (
             <button
               onClick={() => deleteProfile(activeProfileId)}
-              className="px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded text-xs transition-colors"
+              className="px-3 py-1.5 bg-gray-800 hover:bg-red-600 text-gray-400 hover:text-white rounded border border-gray-700 hover:border-red-500 text-xs transition-all"
             >
               删除
             </button>

@@ -27,7 +27,8 @@ export const loadLogFile = async (filePath: string) => {
       sessions: number;
     }>('parse_log_file', { 
       path: filePath,
-      bootRegex: bootMarkerRegex 
+      bootRegex: bootMarkerRegex,
+      levelRegex: logLevelRegex
     });
 
     const fileId = existingFile ? existingFile.id : Date.now().toString();

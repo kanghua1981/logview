@@ -1,1 +1,14 @@
 @import "tailwindcss";
+
+@keyframes flash-highlight {
+  0% { background-color: rgba(59, 130, 246, 0.4); }
+  100% { background-color: transparent; }
+}
+
+.jump-highlight {
+  animation: flash-highlight 2s ease-out;
+}
+
+.log-line:hover {
+  background-color: rgba(255, 255, 255, 0.05);
+}

@@ -2,7 +2,10 @@ use std::fs;
 use std::path::Path;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use tauri::{Manager, Emitter};
+use tauri::{Manager, Emitter, State};
+use memmap2::Mmap;
+use rayon::prelude::*;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileInfo {
@@ -12,7 +15,7 @@ pub struct FileInfo {
     sessions: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct LogSession {
     id: usize,
     start_line: usize,
@@ -33,96 +36,233 @@ pub struct ParsedLog {
     lines: Vec<LogLine>,
 }
 
+// 核心索引结构
+pub struct LogIndex {
+    mmap: Mmap,
+    offsets: Vec<usize>, // 每行起始位置的字节偏移
+    levels: Vec<Option<String>>, // 每行的日志级别（预处理）
+}
+
+#[derive(Default)]
+pub struct AppState {
+    pub current_index: Mutex<Option<Arc<LogIndex>>>,
+}
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
 }
 
+// -----------------------------------------------------------------------------
+// 高性能索引逻辑
+// -----------------------------------------------------------------------------
+
 #[tauri::command]
-async fn parse_log_file(path: String, boot_regex: String) -> Result<FileInfo, String> {
-    let file_path = Path::new(&path);
+async fn parse_log_file(
+    path: String, 
+    boot_regex: String, 
+    level_regex: String,
+    state: State<'_, AppState>
+) -> Result<FileInfo, String> {
+    let file = fs::File::open(&path).map_err(|e| e.to_string())?;
+    let mmap = unsafe { Mmap::map(&file).map_err(|e| e.to_string())? };
     
-    // 获取文件名
-    let file_name = file_path
-        .file_name()
+    // 1. 并行寻找换行符，记录每行起始偏移
+    // 我们寻找所有的 \n 索引
+    let mut offsets = vec![0]; // 第一行起始位置是 0
+    let bytes = &mmap[..];
+    
+    // 使用 rayon 并流并行寻找换行符偏移
+    // 这个操作在 100MB 文件上通常只需几十毫秒
+    let mut newline_offsets: Vec<usize> = bytes.par_iter().enumerate()
+        .filter(|&(_, &b)| b == b'\n')
+        .map(|(idx, _)| idx + 1)
+        .collect();
+    
+    // 确保偏移是有序的
+    newline_offsets.sort_unstable();
+    offsets.extend(newline_offsets);
+
+    // 如果最后一行没有换行符结束，可能需要处理（此处简化处理）
+    if offsets.last() == Some(&bytes.len()) {
+        offsets.pop(); 
+    }
+
+    let line_count = offsets.len();
+    
+    // 2. 预分析：并行提取日志级别和会话分割
+    let level_re = if !level_regex.is_empty() {
+        Regex::new(&level_regex).ok()
+    } else {
+        Regex::new(r"(?i)\b(DEBUG|INFO|WARN|ERROR|FATAL)\b").ok()
+    };
+
+    let boot_re = if !boot_regex.is_empty() {
+        Regex::new(&boot_regex).ok()
+    } else {
+        Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").ok()
+    };
+
+    // 预提取所有级别的 Logic
+    let levels: Vec<Option<String>> = (0..line_count).into_par_iter().map(|idx| {
+        let start = offsets[idx];
+        let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+        let line_bytes = &bytes[start..end];
+        let line_str = String::from_utf8_lossy(line_bytes);
+        
+        level_re.as_ref().and_then(|re| {
+            re.captures(&line_str).and_then(|cap| {
+                if cap.len() > 1 {
+                    cap.get(1).map(|m| m.as_str().to_uppercase())
+                } else {
+                    cap.get(0).map(|m| m.as_str().to_uppercase())
+                }
+            })
+        })
+    }).collect();
+
+    // 3. 计算会话数
+    let sessions_count = if let Some(re) = boot_re {
+        (0..line_count).into_par_iter().filter(|&idx| {
+            let start = offsets[idx];
+            let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+            let line_bytes = &bytes[start..end];
+            let line_str = String::from_utf8_lossy(line_bytes);
+            re.is_match(&line_str)
+        }).count() + 1
+    } else {
+        1
+    };
+
+    let mmap_len = bytes.len();
+
+    // 保存到全局状态
+    let index = Arc::new(LogIndex {
+        mmap,
+        offsets,
+        levels,
+    });
+    
+    let mut current = state.current_index.lock().unwrap();
+    *current = Some(index);
+
+    let file_name = Path::new(&path).file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
-    
-    // 读取文件内容（支持非UTF-8编码）
-    let bytes = fs::read(file_path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
-    
-    // 获取文件大小
-    let metadata = fs::metadata(file_path)
-        .map_err(|e| format!("Failed to get file metadata: {}", e))?;
-    let size = metadata.len();
-    
-    // 统计行数
-    let lines: Vec<&str> = content.lines().collect();
-    let line_count = lines.len();
-    
-    // 检测 Boot 会话 (使用用户定义的正则，如果没提供则使用默认)
-    let boot_count = if !boot_regex.is_empty() {
-        if let Ok(re) = Regex::new(&boot_regex) {
-            lines.iter().filter(|line| re.is_match(line)).count()
-        } else {
-            0
-        }
-    } else {
-        // 默认匹配
-        let boot_re = Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").unwrap();
-        lines.iter().filter(|line| boot_re.is_match(line)).count()
-    };
-    
-    // 会话数等于 Boot 标记数 + 1 (初始会话)
-    // 但如果文件开头就是 Boot 标记，idx > 0 的判断会跳过第一个 marker 导致的会话切分 (逻辑见 parse_log_content)
-    // 为了简单且一致：
-    let session_count = boot_count + 1;
-    
+
     Ok(FileInfo {
         name: file_name,
-        size,
+        size: mmap_len as u64,
         lines: line_count,
-        sessions: session_count,
+        sessions: sessions_count,
     })
 }
 
 #[tauri::command]
 async fn parse_log_content(
-    path: String, 
+    path: String, // 兼容以前的签名
     boot_regex: String,
-    level_regex: String
+    level_regex: String,
+    state: State<'_, AppState>
 ) -> Result<ParsedLog, String> {
-    parse_log_with_splitters(path, vec![boot_regex], level_regex).await
+    let index_opt = {
+        let current = state.current_index.lock().unwrap();
+        current.clone()
+    };
+
+    if let Some(index) = index_opt {
+        let bytes = &index.mmap[..];
+        let line_count = index.offsets.len();
+        
+        // 我们不发送全文 lines 给前端了，只发送基础 Session 和空的 lines (为了兼容逻辑)
+        // 实际上后续前端会通过 get_log_range 请求数据
+        let mut sessions = Vec::new();
+        let mut current_session_start = 1;
+        let mut session_id = 0;
+
+        let boot_re = if !boot_regex.is_empty() {
+            Regex::new(&boot_regex).ok()
+        } else {
+            Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").ok()
+        };
+
+        for idx in 0..line_count {
+            if let Some(ref re) = boot_re {
+                let start = index.offsets[idx];
+                let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
+                let line_str = String::from_utf8_lossy(&bytes[start..end]);
+                
+                if re.is_match(&line_str) && idx > 0 {
+                    sessions.push(LogSession {
+                        id: session_id,
+                        start_line: current_session_start,
+                        end_line: idx,
+                        boot_marker: line_str.trim().to_string(),
+                    });
+                    session_id += 1;
+                    current_session_start = idx + 1;
+                }
+            }
+        }
+
+        // 扫尾末尾会话
+        sessions.push(LogSession {
+            id: session_id,
+            start_line: current_session_start,
+            end_line: line_count,
+            boot_marker: if line_count > 0 { "End of File".to_string() } else { "Full Log".to_string() },
+        });
+
+        // 返回时带上级别元数据 (但不带 content，减少序列化压力)
+        let lines_meta: Vec<LogLine> = index.levels.par_iter().enumerate().map(|(idx, lv)| {
+            LogLine {
+                line_number: idx + 1,
+                content: String::new(), // 内容先留空
+                level: lv.clone(),
+            }
+        }).collect();
+
+        Ok(ParsedLog {
+            sessions,
+            lines: lines_meta,
+        })
+    } else {
+        // 如果状态中没有索引，尝试重新解析 (或者返回错误)
+        // 这里我们选择返回错误，因为 parse_log_file 应该先被调用
+        Err("No file opened or index missing. Call parse_log_file first.".to_string())
+    }
 }
 
 #[tauri::command]
 async fn parse_log_with_custom_splitters(
     path: String,
     splitter_regexes: Vec<String>,
-    level_regex: String
+    _level_regex: String,
+    state: State<'_, AppState>
 ) -> Result<ParsedLog, String> {
-    parse_log_with_splitters(path, splitter_regexes, level_regex).await
-}
+    let index_opt = {
+        let current = state.current_index.lock().unwrap();
+        current.clone()
+    };
 
-async fn parse_log_with_splitters(
-    path: String, 
-    splitter_regexes: Vec<String>,
-    level_regex: String
-) -> Result<ParsedLog, String> {
-    // 读取文件内容（支持非UTF-8编码）
-    let bytes = fs::read(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+    let index = if let Some(idx) = index_opt {
+        idx
+    } else {
+        // 如果索引丢了，尝试重新解析文件 (虽然不如直接报错优雅，但更鲁棒)
+        parse_log_file(path.clone(), String::new(), String::new(), state.clone()).await?;
+        state.current_index.lock().unwrap().clone().ok_or("Failed to re-index file")?
+    };
+
+    let bytes = &index.mmap[..];
+    let line_count = index.offsets.len();
     
-    let lines: Vec<&str> = content.lines().collect();
-    let mut sessions: Vec<LogSession> = Vec::new();
-    let mut log_lines: Vec<LogLine> = Vec::new();
-    
-    // 编译所有分割器正则
+    let mut sessions = Vec::new();
+    let mut current_session_start = 1;
+    let mut session_id = 0;
+
+    // 编译所有激活的分割器
     let mut compiled_splitters = Vec::new();
     for regex_str in &splitter_regexes {
         if !regex_str.is_empty() {
@@ -131,101 +271,93 @@ async fn parse_log_with_splitters(
             }
         }
     }
-    
-    // 如果没有有效的分割器，使用默认
-    if compiled_splitters.is_empty() {
-        let default_re = Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").unwrap();
-        compiled_splitters.push(default_re);
-    }
-    
-    // 检测日志级别的正则
-    let level_re = if !level_regex.is_empty() {
-        Regex::new(&level_regex).ok()
-    } else {
-        Regex::new(r"(?i)\b(DEBUG|INFO|WARN|ERROR|FATAL)\b").ok()
-    };
-    
-    let mut current_session_start = 1;
-    let mut session_id = 0;
-    
-    for (idx, line) in lines.iter().enumerate() {
-        let line_num = idx + 1;
+
+    // 遍历所有行，检查是否匹配任意一个分割器
+    for idx in 0..line_count {
+        let start = index.offsets[idx];
+        let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
+        let line_str = String::from_utf8_lossy(&bytes[start..end]);
         
-        // 检测日志级别
-        let level = level_re.as_ref()
-            .and_then(|re| re.captures(line))
-            .and_then(|cap| {
-                // 如果有捕获组，取第一个捕获组，否则取整个匹配
-                if cap.len() > 1 {
-                    cap.get(1).map(|m| m.as_str().to_uppercase())
-                } else {
-                    cap.get(0).map(|m| m.as_str().to_uppercase())
-                }
-            });
-        
-        // 检查是否匹配任何一个分割器
-        let mut is_session_start = false;
-        let mut matched_marker = String::new();
-        
-        for splitter in &compiled_splitters {
-            if splitter.is_match(line) {
-                is_session_start = true;
-                matched_marker = splitter.find(line)
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_else(|| line.to_string());
+        let mut is_match = false;
+        for re in &compiled_splitters {
+            if re.is_match(&line_str) {
+                is_match = true;
                 break;
             }
         }
-        
-        if is_session_start && idx > 0 {
-            // 结束上一个会话
+
+        if is_match && idx > 0 {
             sessions.push(LogSession {
                 id: session_id,
                 start_line: current_session_start,
-                end_line: line_num - 1,
-                boot_marker: matched_marker.clone(),
+                end_line: idx,
+                boot_marker: line_str.trim().to_string(),
             });
-            
             session_id += 1;
-            current_session_start = line_num;
+            current_session_start = idx + 1;
         }
-        
-        log_lines.push(LogLine {
-            line_number: line_num,
-            content: line.to_string(),
-            level,
-        });
     }
-    
-    // 添加最后一个会话
-    if current_session_start < lines.len() {
-        sessions.push(LogSession {
-            id: session_id,
-            start_line: current_session_start,
-            end_line: lines.len(),
-            boot_marker: if current_session_start < lines.len() {
-                lines[current_session_start].to_string()
-            } else {
-                String::new()
-            },
-        });
-    }
-    
-    // 如果没有检测到会话，创建一个默认会话
-    if sessions.is_empty() {
-        sessions.push(LogSession {
-            id: 0,
-            start_line: 1,
-            end_line: lines.len(),
-            boot_marker: String::from("Full Log"),
-        });
-    }
-    
+
+    // 扫尾末尾会话
+    sessions.push(LogSession {
+        id: session_id,
+        start_line: current_session_start,
+        end_line: line_count,
+        boot_marker: if line_count > 0 { "End of File".to_string() } else { "Full Log".to_string() },
+    });
+
+    // 兼容性返回：只带元数据
+    let lines_meta: Vec<LogLine> = index.levels.par_iter().enumerate().map(|(idx, lv)| {
+        LogLine {
+            line_number: idx + 1,
+            content: String::new(),
+            level: lv.clone(),
+        }
+    }).collect();
+
     Ok(ParsedLog {
         sessions,
-        lines: log_lines,
+        lines: lines_meta,
     })
 }
+
+#[tauri::command]
+async fn get_log_range(
+    start_line: usize, // 1-based
+    end_line: usize,   // 1-based
+    state: State<'_, AppState>
+) -> Result<Vec<LogLine>, String> {
+    let index_opt = {
+        let current = state.current_index.lock().unwrap();
+        current.clone()
+    };
+
+    if let Some(index) = index_opt {
+        let line_count = index.offsets.len();
+        let start_idx = (start_line.max(1) - 1).min(line_count);
+        let end_idx = end_line.min(line_count);
+        
+        if start_idx >= end_idx { return Ok(vec![]); }
+
+        let bytes = &index.mmap[..];
+        let result: Vec<LogLine> = (start_idx..end_idx).into_par_iter().map(|idx| {
+            let start = index.offsets[idx];
+            let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
+            let line_content = String::from_utf8_lossy(&bytes[start..end]).to_string();
+            
+            LogLine {
+                line_number: idx + 1,
+                content: line_content,
+                level: index.levels[idx].clone(),
+            }
+        }).collect();
+
+        Ok(result)
+    } else {
+        Err("No file opened".to_string())
+    }
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PatternStat {
@@ -235,35 +367,38 @@ pub struct PatternStat {
 }
 
 #[tauri::command]
-async fn analyze_log_patterns(path: String) -> Result<Vec<PatternStat>, String> {
-    let bytes = fs::read(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+async fn analyze_log_patterns(state: State<'_, AppState>) -> Result<Vec<PatternStat>, String> {
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
+    
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
     
     use std::collections::HashMap;
+    // 使用并行 map-reduce 来处理模式提取可能会比较复杂，先尝试串行提取但基于内存映射
     let mut patterns: HashMap<String, (usize, Option<String>)> = HashMap::new();
     
-    let level_re = Regex::new(r"(?i)\b(DEBUG|INFO|WARN|ERROR|FATAL)\b").unwrap();
+    // 预编译正则
+    let ts_re = Regex::new(r"\d{2}:\d{2}:\d{2}").unwrap();
+    let n_re = Regex::new(r"\d+").unwrap();
+    let addr_re = Regex::new(r"0x[0-9a-fA-F]+").unwrap();
 
-    for line in content.lines() {
+    for idx in 0..offsets.len() {
+        let start = offsets[idx];
+        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+        let line = String::from_utf8_lossy(&bytes[start..end]);
         if line.trim().is_empty() { continue; }
         
-        // 简单的“指纹”提取：将数字、类十六进制地址替换为占位符
         let mut fingerprint = line.to_string();
-        // 屏蔽时间戳样式 (00:00:00)
-        fingerprint = Regex::new(r"\d{2}:\d{2}:\d{2}").unwrap().replace_all(&fingerprint, "HH:MM:SS").into_owned();
-        // 屏蔽长数字
-        fingerprint = Regex::new(r"\d+").unwrap().replace_all(&fingerprint, "N").into_owned();
-        // 屏蔽 0x 地址
-        fingerprint = Regex::new(r"0x[0-9a-fA-F]+").unwrap().replace_all(&fingerprint, "0xADDR").into_owned();
+        fingerprint = ts_re.replace_all(&fingerprint, "HH:MM:SS").into_owned();
+        fingerprint = n_re.replace_all(&fingerprint, "N").into_owned();
+        fingerprint = addr_re.replace_all(&fingerprint, "0xADDR").into_owned();
 
         let count_tuple = patterns.entry(fingerprint).or_insert((0, None));
         count_tuple.0 += 1;
         
         if count_tuple.1.is_none() {
-            count_tuple.1 = level_re.captures(line)
-                .and_then(|cap| cap.get(1))
-                .map(|m| m.as_str().to_uppercase());
+            count_tuple.1 = index.levels[idx].clone();
         }
     }
 
@@ -271,10 +406,8 @@ async fn analyze_log_patterns(path: String) -> Result<Vec<PatternStat>, String> 
         .map(|(content, (count, level))| PatternStat { content, count, level })
         .collect();
     
-    // 按频率排序
     stats.sort_by(|a, b| b.count.cmp(&a.count));
-    
-    Ok(stats.into_iter().take(50).collect()) // 只取前 50 个最频繁的模式
+    Ok(stats.into_iter().take(50).collect())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -284,18 +417,20 @@ pub struct MetricDataPoint {
 }
 
 #[tauri::command]
-async fn extract_metrics(file_path: String, regex: String) -> Result<Vec<MetricDataPoint>, String> {
-    let bytes = fs::read(&file_path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+async fn extract_metrics(regex: String, state: State<'_, AppState>) -> Result<Vec<MetricDataPoint>, String> {
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
     
-    let re = Regex::new(&regex)
-        .map_err(|e| format!("Invalid regex: {}", e))?;
-    
-    let mut data = Vec::new();
-    for (idx, line) in content.lines().enumerate() {
-        if let Some(caps) = re.captures(line) {
-            // 尝试获取第一个捕获组，如果没有捕获组则尝试匹配整个数值
+    let re = Regex::new(&regex).map_err(|e| format!("Invalid regex: {}", e))?;
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+
+    let data: Vec<MetricDataPoint> = (0..offsets.len()).into_par_iter().filter_map(|idx| {
+        let start = offsets[idx];
+        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+        let line = String::from_utf8_lossy(&bytes[start..end]);
+        
+        if let Some(caps) = re.captures(&line) {
             let val_str = if caps.len() > 1 {
                 caps.get(1).map(|m| m.as_str())
             } else {
@@ -304,14 +439,15 @@ async fn extract_metrics(file_path: String, regex: String) -> Result<Vec<MetricD
 
             if let Some(s) = val_str {
                 if let Ok(val) = s.parse::<f64>() {
-                    data.push(MetricDataPoint {
+                    return Some(MetricDataPoint {
                         line_number: idx + 1,
                         value: val,
                     });
                 }
             }
         }
-    }
+        None
+    }).collect();
     
     Ok(data)
 }
@@ -343,6 +479,75 @@ async fn save_sessions(
         .map_err(|e| format!("Failed to write to target file: {}", e))?;
 
     Ok(())
+}
+
+#[tauri::command]
+async fn search_log(
+    query: String,
+    is_regex: bool,
+    line_ranges: Option<Vec<(usize, usize)>>, // 新增：可选的行号范围限制 (start, end) 1-based
+    state: State<'_, AppState>
+) -> Result<Vec<LogLine>, String> {
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
+    
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+
+    let search_fn: Box<dyn Fn(&str) -> bool + Send + Sync> = if is_regex {
+        let re = Regex::new(&query).map_err(|e| e.to_string())?;
+        Box::new(move |s| re.is_match(s))
+    } else {
+        let q = query.to_lowercase();
+        Box::new(move |s| s.to_lowercase().contains(&q))
+    };
+
+    // 如果指定了范围，只在范围内搜索
+    let result: Vec<LogLine> = if let Some(ranges) = line_ranges {
+        // 将范围转换为索引
+        ranges.into_par_iter().flat_map(|(start, end)| {
+            let start_idx = (start.max(1) - 1).min(offsets.len());
+            let end_idx = end.min(offsets.len());
+            
+            (start_idx..end_idx).into_par_iter().filter_map(|idx| {
+                let start_pos = offsets[idx];
+                let end_pos = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+                let line_str = String::from_utf8_lossy(&bytes[start_pos..end_pos]);
+                
+                if search_fn(&line_str) {
+                    Some(LogLine {
+                        line_number: idx + 1,
+                        content: line_str.to_string(),
+                        level: index.levels[idx].clone(),
+                    })
+                } else {
+                    None
+                }
+            }).collect::<Vec<_>>()
+        }).collect()
+    } else {
+        // 全文搜索
+        (0..offsets.len())
+            .into_par_iter()
+            .filter_map(|idx| {
+                let start = offsets[idx];
+                let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+                let line_str = String::from_utf8_lossy(&bytes[start..end]);
+                
+                if search_fn(&line_str) {
+                    Some(LogLine {
+                        line_number: idx + 1,
+                        content: line_str.to_string(),
+                        level: index.levels[idx].clone(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -394,23 +599,29 @@ pub struct TimeGap {
 }
 
 #[tauri::command]
-async fn analyze_time_gaps(file_path: String, timestamp_regex: String) -> Result<Vec<TimeGap>, String> {
-    let bytes = fs::read(&file_path).map_err(|e| e.to_string())?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+async fn analyze_time_gaps(timestamp_regex: String, state: State<'_, AppState>) -> Result<Vec<TimeGap>, String> {
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
     
     let re = Regex::new(&timestamp_regex).map_err(|e| e.to_string())?;
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+
     let mut last_time: Option<f64> = None;
     let mut gaps = Vec::new();
 
-    for (idx, line) in content.lines().enumerate() {
-        if let Some(caps) = re.captures(line) {
+    for idx in 0..offsets.len() {
+        let start = offsets[idx];
+        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+        let line = String::from_utf8_lossy(&bytes[start..end]);
+
+        if let Some(caps) = re.captures(&line) {
             let ts_str = caps.get(1).map(|m| m.as_str()).unwrap_or("");
             let current_ms = parse_timestamp_to_ms(ts_str);
 
             if current_ms > 0.0 {
                 if let Some(last) = last_time {
                     let diff = current_ms - last;
-                    // 只有当差距显著（如 > 10ms）时才记录，避免数据过多
                     if diff > 10.0 {
                         gaps.push(TimeGap {
                             line_number: idx + 1,
@@ -438,14 +649,14 @@ pub struct WorkflowSegment {
 
 #[tauri::command]
 async fn analyze_workflow_duration(
-    file_path: String,
     start_regex: String,
     end_regex: String,
     timestamp_regex: String,
-    id_regex: Option<String>
+    id_regex: Option<String>,
+    state: State<'_, AppState>
 ) -> Result<Vec<WorkflowSegment>, String> {
-    let bytes = fs::read(&file_path).map_err(|e| e.to_string())?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
     
     let start_re = Regex::new(&start_regex).map_err(|e| format!("Start Regex Error: {}", e))?;
     let end_re = Regex::new(&end_regex).map_err(|e| format!("End Regex Error: {}", e))?;
@@ -458,19 +669,22 @@ async fn analyze_workflow_duration(
         None
     };
 
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
     let mut segments = Vec::new();
     
-    // 如果有 ID，用 Map 跟踪。如果没有 ID，用 Stack (支持嵌套) 或简单的顺序。
-    // 这里我们默认支持嵌套 (Stack) 如果没有 ID。
     use std::collections::HashMap;
     let mut active_starts_with_id: HashMap<String, (usize, f64)> = HashMap::new();
     let mut active_starts_no_id: Vec<(usize, f64)> = Vec::new();
     let mut last_ts = 0.0;
 
-    for (idx, line) in content.lines().enumerate() {
+    for idx in 0..offsets.len() {
+        let start = offsets[idx];
+        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+        let line = String::from_utf8_lossy(&bytes[start..end]);
         let line_num = idx + 1;
         
-        if let Some(caps) = ts_re.captures(line) {
+        if let Some(caps) = ts_re.captures(&line) {
             if let Some(m) = caps.get(1) {
                 let ts = parse_timestamp_to_ms(m.as_str());
                 if ts > 0.0 {
@@ -480,7 +694,7 @@ async fn analyze_workflow_duration(
         }
         
         let id = id_re.as_ref()
-            .and_then(|re| re.captures(line))
+            .and_then(|re| re.captures(&line))
             .and_then(|c| {
                 if c.len() > 1 {
                     c.get(1).map(|m| m.as_str().to_string())
@@ -489,13 +703,13 @@ async fn analyze_workflow_duration(
                 }
             });
 
-        if start_re.is_match(line) {
+        if start_re.is_match(&line) {
             if let Some(ref flow_id) = id {
                 active_starts_with_id.insert(flow_id.clone(), (line_num, last_ts));
             } else {
                 active_starts_no_id.push((line_num, last_ts));
             }
-        } else if end_re.is_match(line) {
+        } else if end_re.is_match(&line) {
             if let Some(ref flow_id) = id {
                 if let Some((s_line, s_ts)) = active_starts_with_id.remove(flow_id) {
                     if last_ts > 0.0 && s_ts > 0.0 {
@@ -531,24 +745,29 @@ async fn analyze_workflow_duration(
 
 #[tauri::command]
 async fn analyze_recurrent_intervals(
-    file_path: String,
     regex: String,
     timestamp_regex: String,
+    state: State<'_, AppState>
 ) -> Result<Vec<WorkflowSegment>, String> {
-    let bytes = fs::read(&file_path).map_err(|e| e.to_string())?;
-    let content = String::from_utf8_lossy(&bytes).to_string();
+    let index_opt = state.current_index.lock().unwrap().clone();
+    let index = index_opt.ok_or("No file opened")?;
     
     let re = Regex::new(&regex).map_err(|e| format!("Regex Error: {}", e))?;
     let ts_re = Regex::new(&timestamp_regex).map_err(|e| format!("Timestamp Regex Error: {}", e))?;
 
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
     let mut segments = Vec::new();
     let mut last_hit: Option<(usize, f64)> = None;
     let mut last_ts = 0.0;
 
-    for (idx, line) in content.lines().enumerate() {
+    for idx in 0..offsets.len() {
+        let start = offsets[idx];
+        let end = if idx + 1 < offsets.len() { offsets[idx+1] } else { bytes.len() };
+        let line = String::from_utf8_lossy(&bytes[start..end]);
         let line_num = idx + 1;
         
-        if let Some(caps) = ts_re.captures(line) {
+        if let Some(caps) = ts_re.captures(&line) {
             if let Some(m) = caps.get(1) {
                 let ts = parse_timestamp_to_ms(m.as_str());
                 if ts > 0.0 {
@@ -557,7 +776,7 @@ async fn analyze_recurrent_intervals(
             }
         }
 
-        if re.is_match(line) {
+        if re.is_match(&line) {
             if last_ts > 0.0 {
                 if let Some((prev_line, prev_ts)) = last_hit {
                     segments.push(WorkflowSegment {
@@ -583,6 +802,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .manage(AppState::default()) // 注册全局状态
         .setup(|app| {
             let window = app.get_webview_window("main").unwrap();
             
@@ -603,6 +823,8 @@ pub fn run() {
             parse_log_file,
             parse_log_content,
             parse_log_with_custom_splitters,
+            get_log_range,
+            search_log,
             analyze_log_patterns,
             extract_metrics,
             analyze_time_gaps,

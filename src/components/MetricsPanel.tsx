@@ -62,7 +62,6 @@ export default function MetricsPanel() {
     setIsExtracting(true);
     try {
       const data = await invoke('extract_metrics', {
-        filePath: currentFile.path,
         regex: regex
       });
       updateMetricData(metricId, data as any[]);

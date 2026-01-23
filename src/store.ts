@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { invoke } from '@tauri-apps/api/core';
 
 export interface LogFile {
   id: string;
@@ -98,7 +99,19 @@ interface LogViewState {
 
   // 跳转控制
   scrollTargetLine: number | null;
+  flashLine: number | null;
+  currentVisibleLine: number;
   activeView: 'log' | 'dashboard' | 'metrics';
+
+  // 独立查询结果
+  searchQuery: string;
+  searchResults: LogLine[];
+  isSearchPanelOpen: boolean;
+  searchOnlySelectedSessions: boolean;
+  isSearchRegex: boolean;
+
+  // 字体大小
+  fontSize: number;
 
   // 新增指标追踪
   metrics: LogMetric[];
@@ -142,8 +155,18 @@ interface LogViewState {
   // 视图 & 跳转 Actions
   setActiveView: (view: 'log' | 'dashboard' | 'metrics') => void;
   setScrollTargetLine: (line: number | null) => void;
+  setFlashLine: (line: number | null) => void;
+  setCurrentVisibleLine: (line: number) => void;
   setAnalysisStatsResults: (stats: any[], gaps: any[]) => void;
   setAnalysisWorkflowResults: (workflows: any[]) => void;
+
+  // 独立查询 Actions
+  setSearchQuery: (query: string) => void;
+  performSearch: () => void;
+  setSearchPanelOpen: (open: boolean) => void;
+  setSearchOnlySelectedSessions: (only: boolean) => void;
+  setSearchRegex: (isRegex: boolean) => void;
+  setFontSize: (size: number | ((prev: number) => number)) => void;
 
   // 新增指标 Actions
   addMetric: (name: string, regex: string) => void;
@@ -155,6 +178,8 @@ interface LogViewState {
   // 导入导出配置
   exportConfig: () => string;
   importConfig: (json: string) => boolean;
+  exportHighlights: () => string;
+  importHighlights: (json: string) => boolean;
 
   filterLogLines: () => void;
 }
@@ -179,7 +204,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   showOnlyHighlights: false,
   metrics: [],
   scrollTargetLine: null,
+  flashLine: null,
+  currentVisibleLine: 1,
   activeView: 'log',
+  searchQuery: '',
+  searchResults: [],
+  isSearchPanelOpen: false,
+  searchOnlySelectedSessions: false,
+  isSearchRegex: false,
+  fontSize: Number(localStorage.getItem('font_size')) || 12,
   analysisStats: [],
   analysisTimeGaps: [],
   analysisWorkflows: [],
@@ -238,6 +271,9 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setSelectedSessions: (ids) => {
     set({ selectedSessionIds: ids });
     get().filterLogLines();
+    if (get().isSearchPanelOpen && get().searchOnlySelectedSessions) {
+      get().performSearch();
+    }
   },
   setLogLines: (lines) => {
     set({ logLines: lines });
@@ -249,6 +285,29 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setLogLevelFilter: (levels) => {
     set({ logLevelFilter: levels });
     get().filterLogLines();
+  },
+
+  updateLogLinesContent: (updatedLines: LogLine[]) => {
+    const { logLines } = get();
+    // 这是一个非常高频的操作，我们直接修改 logLines 引用可能更高效，或者使用映射处理
+    // 为了 React 不重新渲染不相关的行，这里我们要确保逻辑正确
+    const lineMap = new Map(updatedLines.map(l => [l.lineNumber, l.content]));
+    
+    set(state => ({
+      logLines: state.logLines.map(line => {
+        if (lineMap.has(line.lineNumber)) {
+          return { ...line, content: lineMap.get(line.lineNumber)! };
+        }
+        return line;
+      }),
+      // 同时更新 filteredLines 以便视图层看到变化
+      filteredLines: state.filteredLines.map(line => {
+        if (lineMap.has(line.lineNumber)) {
+          return { ...line, content: lineMap.get(line.lineNumber)! };
+        }
+        return line;
+      })
+    }));
   },
 
   addHighlight: (text) => set((state) => {
@@ -317,7 +376,62 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   }),
 
   setActiveView: (view) => set({ activeView: view }),
-  setScrollTargetLine: (line) => set({ scrollTargetLine: line }),
+  setScrollTargetLine: (line) => set({ scrollTargetLine: line, flashLine: line }),
+  setFlashLine: (line) => set({ flashLine: line }),
+  setCurrentVisibleLine: (line) => set({ currentVisibleLine: line }),
+  
+  setSearchQuery: (query) => set({ searchQuery: query }),
+  setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
+  setSearchOnlySelectedSessions: (only) => {
+    set({ searchOnlySelectedSessions: only });
+    get().performSearch();
+  },
+  setSearchRegex: (isRegex) => {
+    set({ isSearchRegex: isRegex });
+    get().performSearch();
+  },
+  setFontSize: (size) => set((state) => {
+    const newSize = typeof size === 'function' ? size(state.fontSize) : size;
+    const clampedSize = Math.max(8, Math.min(30, newSize)); // 限制在 8px - 30px
+    localStorage.setItem('font_size', clampedSize.toString());
+    return { fontSize: clampedSize };
+  }),
+  performSearch: async () => {
+    const { searchQuery, isSearchRegex, searchOnlySelectedSessions, selectedSessionIds, sessions } = get();
+    if (!searchQuery.trim()) {
+      set({ searchResults: [], isSearchPanelOpen: false });
+      return;
+    }
+    
+    try {
+      // 如果开启了“仅限选中会话”，计算范围
+      let lineRanges = null;
+      if (searchOnlySelectedSessions && selectedSessionIds.length > 0) {
+        lineRanges = selectedSessionIds.map(id => {
+          const s = sessions.find(sess => sess.id === id);
+          return s ? [s.startLine, s.endLine] : null;
+        }).filter(Boolean);
+      }
+
+      const results = await invoke<any[]>('search_log', {
+        query: searchQuery,
+        isRegex: isSearchRegex,
+        lineRanges
+      });
+      
+      set({ 
+        searchResults: results.map(l => ({
+          lineNumber: l.line_number,
+          content: l.content,
+          level: l.level as any
+        })), 
+        isSearchPanelOpen: true 
+      });
+    } catch (e) {
+      console.error('Search failed:', e);
+    }
+  },
+
   setAnalysisStatsResults: (stats, gaps) => set({ 
     analysisStats: stats, 
     analysisTimeGaps: gaps, 
@@ -401,7 +515,30 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       // alert('导入失败: ' + err);
       return false;
     }
-  },  
+  },
+
+  exportHighlights: () => {
+    return JSON.stringify({ 
+      type: 'logview-highlights',
+      version: '1.0',
+      highlights: get().highlights 
+    }, null, 2);
+  },
+
+  importHighlights: (json: string) => {
+    try {
+      const data = JSON.parse(json);
+      if (data.type !== 'logview-highlights' || !Array.isArray(data.highlights)) {
+        return false;
+      }
+      set({ highlights: data.highlights });
+      get().filterLogLines();
+      return true;
+    } catch (e) {
+      return false;
+    }
+  },
+  
   // 会话分割器管理实现
   addSessionSplitter: (name, regex, isRegex) => set((state) => {
     const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
