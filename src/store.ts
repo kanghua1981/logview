@@ -140,6 +140,7 @@ interface LogViewState {
   aiEndpoint: string;
   aiModel: string;
   aiApiKey: string;
+  aiSystemPrompt: string;
 
   // Actions
   addFile: (file: LogFile) => void;
@@ -199,7 +200,7 @@ interface LogViewState {
   setAiLoading: (loading: boolean) => void;
   setAiPanelOpen: (open: boolean) => void;
   clearAiMessages: () => void;
-  setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string }) => void;
+  setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string, systemPrompt?: string }) => void;
 
   // 新增指标 Actions
   addMetric: (name: string, regex: string) => void;
@@ -263,6 +264,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.deepseek.com',
   aiModel: localStorage.getItem('ai_model') || 'deepseek-chat',
   aiApiKey: localStorage.getItem('ai_api_key') || '',
+  aiSystemPrompt: localStorage.getItem('ai_system_prompt') || '你是一个专业的日志分析专家，擅长从混合日志中定位根因。请基于提供的路径上下文和采样行进行推理。',
   
   // ... 其他 Actions 保持不变
   addFile: (file) => set((state) => {
@@ -481,10 +483,12 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     if (config.endpoint !== undefined) localStorage.setItem('ai_endpoint', config.endpoint);
     if (config.model !== undefined) localStorage.setItem('ai_model', config.model);
     if (config.apiKey !== undefined) localStorage.setItem('ai_api_key', config.apiKey);
+    if (config.systemPrompt !== undefined) localStorage.setItem('ai_system_prompt', config.systemPrompt);
     return {
       aiEndpoint: config.endpoint ?? state.aiEndpoint,
       aiModel: config.model ?? state.aiModel,
       aiApiKey: config.apiKey ?? state.aiApiKey,
+      aiSystemPrompt: config.systemPrompt ?? state.aiSystemPrompt,
     };
   }),
   

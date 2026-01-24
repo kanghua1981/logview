@@ -29,6 +29,7 @@ export default function ConfigPanel() {
     aiEndpoint,
     aiModel,
     aiApiKey,
+    aiSystemPrompt,
     setAiConfig
   } = useLogStore();
 
@@ -42,6 +43,7 @@ export default function ConfigPanel() {
   const [endpointInput, setEndpointInput] = useState(aiEndpoint);
   const [modelInput, setModelInput] = useState(aiModel);
   const [apiKeyInput, setApiKeyInput] = useState(aiApiKey);
+  const [systemPromptInput, setSystemPromptInput] = useState(aiSystemPrompt);
 
   const currentFile = files.find(f => f.id === currentFileId);
 
@@ -53,11 +55,12 @@ export default function ConfigPanel() {
     setEndpointInput(aiEndpoint);
     setModelInput(aiModel);
     setApiKeyInput(aiApiKey);
+    setSystemPromptInput(aiSystemPrompt);
     const activeProfile = profiles.find(p => p.id === activeProfileId);
     if (activeProfile) {
       setProfileName(activeProfile.name);
     }
-  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles, aiEndpoint, aiModel, aiApiKey]);
+  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles, aiEndpoint, aiModel, aiApiKey, aiSystemPrompt]);
 
   const logLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
 
@@ -320,13 +323,28 @@ export default function ConfigPanel() {
               />
             </div>
           </div>
+
+          <div>
+            <label className="text-[10px] text-gray-500 block mb-1 uppercase">System Prompt (业务背景/专家角色)</label>
+            <textarea
+              value={systemPromptInput}
+              onChange={(e) => setSystemPromptInput(e.target.value)}
+              placeholder="你是一个专业的日志分析专家..."
+              rows={4}
+              className="w-full px-2 py-1.5 bg-gray-900 text-purple-200 rounded border border-purple-900/50 focus:border-purple-500 focus:outline-none text-[10px] font-sans leading-relaxed resize-none"
+            />
+            <p className="text-[9px] text-gray-600 mt-1 italic">
+              * 正则过滤格式协议 (FILTER:) 会自动附加在你的提示词之后，无需重复设置。
+            </p>
+          </div>
           
           <button
             onClick={() => {
               setAiConfig({
                 endpoint: endpointInput,
                 model: modelInput,
-                apiKey: apiKeyInput
+                apiKey: apiKeyInput,
+                systemPrompt: systemPromptInput
               });
               alert('AI 配置已保存');
             }}

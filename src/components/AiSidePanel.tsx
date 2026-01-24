@@ -8,6 +8,7 @@ export default function AiSidePanel() {
   const aiMessages = useLogStore((state) => state.aiMessages);
   const isAiLoading = useLogStore((state) => state.isAiLoading);
   const clearAiMessages = useLogStore((state) => state.clearAiMessages);
+  const addRefinementFilter = useLogStore((state) => state.addRefinementFilter);
   
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -17,6 +18,23 @@ export default function AiSidePanel() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [aiMessages, isAiLoading]);
+
+  const parseFilters = (content: string) => {
+    const lines = content.split('\n');
+    const filters: { regex: string; reason: string }[] = [];
+    const cleanLines: string[] = [];
+
+    lines.forEach(line => {
+      const match = line.match(/^FILTER:\s*(.*?)\s*\|\|\s*(.*)$/);
+      if (match) {
+        filters.push({ regex: match[1], reason: match[2] });
+      } else {
+        cleanLines.push(line);
+      }
+    });
+
+    return { cleanContent: cleanLines.join('\n'), filters };
+  };
 
   if (!isAiPanelOpen) return null;
 
@@ -30,7 +48,8 @@ export default function AiSidePanel() {
         <div className="flex items-center space-x-2">
           <button 
             onClick={clearAiMessages}
-            className="p-1.5 hover:bg-gray-700 rounded text-gray-400 hover:text-red-400 title='清空对话'"
+            className="p-1.5 hover:bg-gray-700 rounded text-gray-400 hover:text-red-400"
+            title="清空对话"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
@@ -55,23 +74,67 @@ export default function AiSidePanel() {
             <p className="text-[10px] mt-2 opacity-60">AI 会结合当前固化的过滤结果进行分析</p>
           </div>
         ) : (
-          aiMessages.map((msg, idx) => (
-            <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-              <div className={`max-w-[90%] rounded-lg p-3 text-sm ${
-                msg.role === 'user' 
-                ? 'bg-blue-600 text-white rounded-br-none' 
-                : 'bg-gray-800 text-gray-200 border border-gray-700 rounded-bl-none'
-              }`}>
-                {msg.role === 'assistant' ? (
-                  <div className="prose prose-invert prose-sm max-w-none">
-                    <ReactMarkdown>{msg.content}</ReactMarkdown>
-                  </div>
-                ) : (
-                  msg.content
-                )}
+          aiMessages.map((msg, idx) => {
+            const { cleanContent, filters } = msg.role === 'assistant' ? parseFilters(msg.content) : { cleanContent: msg.content, filters: [] };
+            
+            return (
+              <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                <div className={`max-w-[95%] rounded-lg p-3 text-sm ${
+                  msg.role === 'user' 
+                  ? 'bg-blue-600 text-white rounded-br-none shadow-lg shadow-blue-900/20' 
+                  : 'bg-gray-800 text-gray-200 border border-gray-700 rounded-bl-none'
+                }`}>
+                  {msg.role === 'assistant' ? (
+                    <div className="space-y-3">
+                      <div className="prose prose-invert prose-sm max-w-none">
+                        <ReactMarkdown>{cleanContent}</ReactMarkdown>
+                      </div>
+                      
+                      {filters.length > 0 && (
+                        <div className="pt-2 border-t border-gray-700 space-y-2">
+                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">推荐过滤建议:</p>
+                          {filters.map((f, i) => {
+                            // 确定真正的过滤项（带前缀）
+                            let finalFilter = f.regex;
+                            if (!finalFilter.startsWith('!') && !finalFilter.startsWith('=') && !finalFilter.startsWith('/')) {
+                              finalFilter = '/' + finalFilter;
+                            }
+
+                            // 获取显示图标和样式
+                            const isRegex = finalFilter.startsWith('/');
+                            const isExclude = finalFilter.startsWith('!');
+                            const isExact = finalFilter.startsWith('=');
+                            
+                            const icon = isRegex ? '/' : isExclude ? '!' : isExact ? '=' : '🔎';
+                            const iconColor = isRegex ? 'text-purple-400' : isExclude ? 'text-red-400' : isExact ? 'text-emerald-400' : 'text-blue-400';
+
+                            return (
+                              <button
+                                key={i}
+                                onClick={() => addRefinementFilter(finalFilter)}
+                                className="w-full text-left p-2 rounded bg-blue-900/10 hover:bg-blue-900/30 border border-blue-800/30 transition-all text-[11px] group"
+                              >
+                                <div className="flex items-center justify-between mb-0.5">
+                                  <div className="flex items-center space-x-1">
+                                    <span className={`${iconColor} font-bold mr-1`}>{icon}</span>
+                                    <span className="font-mono text-blue-300 font-bold">{f.regex.replace(/^[!=/]/, '')}</span>
+                                  </div>
+                                  <span className="opacity-0 group-hover:opacity-100 text-blue-300 transition-opacity">应用 →</span>
+                                </div>
+                                <div className="text-gray-400 leading-tight italic">{f.reason}</div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    msg.content
+                  )}
+                </div>
               </div>
-            </div>
-          ))
+            );
+          })
         )}
         
         {isAiLoading && (

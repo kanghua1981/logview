@@ -133,7 +133,7 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
 
     try {
       const context = await collectAiContext();
-      const { aiEndpoint, aiModel, aiApiKey } = useLogStore.getState();
+      const { aiEndpoint, aiModel, aiApiKey, aiSystemPrompt } = useLogStore.getState();
       
       if (!aiApiKey) {
         store.addAiMessage({ 
@@ -153,12 +153,26 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
 
       const prompt = `分析路径: ${context.breadcrumbs.join(' -> ') || '全文'}\n分析文件: ${context.path}\n用户提议: ${cmd}\n\n日志采样内容:\n${context.sampleLines}`;
       
+      const technicalProtocol = `
+---
+注意：如果发现某些关键字或模式对进一步排查很有帮助，请在回复末尾按照以下格式建议过滤条件（每行一个）:
+FILTER: <pattern> || <说明建议理由>
+
+其中 <pattern> 遵循以下规范:
+- 正则表达式: 直接写正则内容 (例如: attr_get_value.*failed)
+- 排除关键字: 以 ! 开头 (例如: !ignore_this)
+- 精确匹配: 以 = 开头 (例如: =exact_match)
+`;
+
       const response = await invoke<string>('call_openai_api', {
         baseUrl: aiEndpoint,
         apiKey: aiApiKey,
         model: aiModel,
         messages: [
-          { role: 'system', content: '你是一个专业的日志分析专家，擅长从混合日志中定位根因。请基于提供的路径上下文和采样行进行推理。' },
+          { 
+            role: 'system', 
+            content: `${aiSystemPrompt}\n${technicalProtocol}` 
+          },
           { role: 'user', content: prompt }
         ]
       });
