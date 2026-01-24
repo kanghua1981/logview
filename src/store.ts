@@ -675,7 +675,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     const currentFile = state.files.find(f => f.id === state.currentFileId);
     if (!currentFile) return;
     
-    const { loadLogFile } = await import('./components/FileManager');
+    const { loadLogFile } = await import('./utils/logLoader');
     await loadLogFile(currentFile.path);
   },
   

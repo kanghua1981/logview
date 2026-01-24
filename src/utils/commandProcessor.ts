@@ -1,5 +1,7 @@
 import { useLogStore } from '../store';
 import { invoke } from '@tauri-apps/api/core';
+import { open, save } from '@tauri-apps/plugin-dialog';
+import { loadLogFile } from './logLoader';
 
 export interface CommandResult {
   success: boolean;
@@ -46,12 +48,40 @@ export const processCommand = async (input: string, mode: 'command' | 'time'): P
 
     // 3. 导出指令
     if (cmd === 'export' || cmd === 'exp') {
-      return { success: true, action: 'export' };
+      const displayIndices = store.filteredIndices;
+      if (displayIndices.length === 0) return { success: false, message: '当前视图无内容可导出' };
+      
+      try {
+        const path = await save({
+          filters: [{ name: 'Log File', extensions: ['log', 'txt'] }],
+          defaultPath: `export_result_${new Date().getTime()}.log`
+        });
+
+        if (path) {
+          await invoke('save_filtered_logs', { path, indices: displayIndices });
+          return { success: true, message: '导出成功', action: 'export' };
+        }
+        return { success: false }; // 用户取消
+      } catch (e) {
+        return { success: false, message: '导出失败: ' + e };
+      }
     }
 
     // 4. 打开新文件
     if (cmd === 'o' || cmd === 'open') {
-      return { success: true, action: 'open' };
+      try {
+        const path = await open({
+          multiple: false,
+          filters: [{ name: 'Log Files', extensions: ['log', 'txt', 'out', 'txt*'] }]
+        });
+        if (path && typeof path === 'string') {
+          await loadLogFile(path);
+          return { success: true, action: 'open' };
+        }
+        return { success: false }; // 用户取消
+      } catch (e) {
+        return { success: false, message: '打开文件失败: ' + e };
+      }
     }
 
     // 5. 清空精简器

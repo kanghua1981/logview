@@ -1,11 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { useLogStore } from '../store';
-import { loadLogFile } from './FileManager';
+import { loadLogFile } from '../utils/logLoader';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { processCommand } from '../utils/commandProcessor';
-import { save, open } from '@tauri-apps/plugin-dialog';
 
 export default function LogViewer() {
   const filteredIndices = useLogStore((state) => state.filteredIndices);
@@ -44,28 +43,12 @@ export default function LogViewer() {
   const fetchTimeoutRef = useRef<any>(null);
   const lastUpdateRef = useRef<number>(0);
   const handleExportResult = async () => {
-    if (displayIndices.length === 0) return;
-    
-    try {
-      setExporting(true);
-      const path = await save({
-        filters: [{ name: 'Log File', extensions: ['log', 'txt'] }],
-        defaultPath: `export_result_${new Date().getTime()}.log`
-      });
-
-      if (path) {
-        await invoke('save_filtered_logs', { 
-          path, 
-          indices: displayIndices 
-        });
-        alert('导出成功！');
-      }
-    } catch (e) {
-      console.error(e);
-      alert('导出失败: ' + e);
-    } finally {
-      setExporting(false);
+    setExporting(true);
+    const result = await processCommand('export', 'command');
+    if (!result.success && result.message) {
+      alert(result.message);
     }
+    setExporting(false);
   };
 
   const getRefinementInfo = (filter: string) => {
@@ -152,8 +135,9 @@ export default function LogViewer() {
         setLocalSearch(prev => {
           const newVal = prev + e.key;
           const prefix = getActiveModeInfo().prefix;
-          // 命令和时间模式下不触发实时过滤，避免输入过程中视图消失
-          if (refinementMode !== 'command' && refinementMode !== 'time') {
+          // 命令和时间模式下不触发实时过滤，亦或用户正在手动输入这些前缀，避免输入过程中视图消失
+          if (refinementMode !== 'command' && refinementMode !== 'time' && 
+              !newVal.startsWith(':') && !newVal.startsWith('@')) {
             setTransientRefinement(prefix + newVal);
           }
           return newVal;
@@ -168,8 +152,10 @@ export default function LogViewer() {
 
   // 当 localSearch 或 mode 变化时同步到 store
   useEffect(() => {
-    // 命令和时间模式是“指令型”而非“搜索型”，不需要实时反馈结果
-    if (refinementMode === 'command' || refinementMode === 'time') {
+    const trimmed = localSearch.trim();
+    // 命令和时间模式是“指令型”而非“搜索型”，亦或用户正在手动输入这些前缀，均不触发实时过滤
+    if (refinementMode === 'command' || refinementMode === 'time' || 
+        trimmed.startsWith(':') || trimmed.startsWith('@')) {
       setTransientRefinement('');
       return;
     }
@@ -504,20 +490,6 @@ export default function LogViewer() {
                 if (targetMode === 'command' || targetMode === 'time') {
                   const result = await processCommand(finalInput, targetMode);
                   if (result.success) {
-                    if (result.action === 'export') {
-                      handleExportResult();
-                    } else if (result.action === 'open') {
-                      const path = await open({
-                        multiple: false,
-                        filters: [{
-                          name: 'Log Files',
-                          extensions: ['log', 'txt', 'out', 'txt*']
-                        }]
-                      });
-                      if (path && typeof path === 'string') {
-                        loadLogFile(path);
-                      }
-                    }
                     setLocalSearch('');
                     setRefinementMode('include');
                   } else if (result.message) {

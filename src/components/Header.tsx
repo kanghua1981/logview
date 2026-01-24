@@ -48,7 +48,10 @@ export default function Header() {
   return (
     <header className="h-14 bg-gray-800 text-white flex items-center justify-between px-4 border-b border-gray-700 relative z-50">
       <div className="flex items-center space-x-4">
-        <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">LogView</h1>
+        <div className="flex items-baseline space-x-2">
+          <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">LogView</h1>
+          <span className="text-[10px] font-mono text-gray-500 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded select-none">v1.2.0</span>
+        </div>
         {currentFile && (
           <div className="flex items-center space-x-2 text-sm text-gray-400">
             <span className="px-2 py-0.5 bg-gray-900 border border-gray-700 rounded text-gray-300">

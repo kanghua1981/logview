@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLogStore, LogProfile } from '../store';
-import { loadLogFile } from './FileManager';
+import { loadLogFile } from '../utils/logLoader';
 import { save, open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 
