@@ -10,7 +10,9 @@ export const loadLogFile = async (filePath: string) => {
     addFile, 
     setCurrentFile, 
     bootMarkerRegex, 
-    logLevelRegex 
+    logLevelRegex,
+    timestampRegex,
+    timeGapThreshold
   } = useLogStore.getState();
   
   try {
@@ -66,7 +68,9 @@ export const loadLogFile = async (filePath: string) => {
     }>('parse_log_content', { 
       path: filePath,
       bootRegex: bootMarkerRegex,
-      levelRegex: logLevelRegex
+      levelRegex: logLevelRegex,
+      timestampRegex: timestampRegex,
+      timeGapThreshold: timeGapThreshold
     });
 
     useLogStore.getState().setParsedLog({

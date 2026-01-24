@@ -11,12 +11,14 @@ export default function ConfigPanel() {
     bootMarkerRegex, 
     logLevelRegex,
     timestampRegex,
+    timeGapThreshold,
     logLevelFilter,
     files,
     currentFileId,
     setBootMarkerRegex,
     setLogLevelRegex,
     setTimestampRegex,
+    setTimeGapThreshold,
     setLogLevelFilter,
     addProfile,
     updateProfile,
@@ -29,6 +31,7 @@ export default function ConfigPanel() {
   const [bootInput, setBootInput] = useState(bootMarkerRegex);
   const [levelInput, setLevelInput] = useState(logLevelRegex);
   const [timestampInput, setTimestampInput] = useState(timestampRegex);
+  const [timeGapInput, setTimeGapInput] = useState(timeGapThreshold);
   const [profileName, setProfileName] = useState('');
 
   const currentFile = files.find(f => f.id === currentFileId);
@@ -37,6 +40,7 @@ export default function ConfigPanel() {
     setBootInput(bootMarkerRegex);
     setLevelInput(logLevelRegex);
     setTimestampInput(timestampRegex);
+    setTimeGapInput(timeGapThreshold);
     const activeProfile = profiles.find(p => p.id === activeProfileId);
     if (activeProfile) {
       setProfileName(activeProfile.name);
@@ -57,6 +61,7 @@ export default function ConfigPanel() {
     setBootMarkerRegex(bootInput);
     setLogLevelRegex(levelInput);
     setTimestampRegex(timestampInput);
+    setTimeGapThreshold(timeGapInput);
     
     // 如果有当前文件，触发重新解析
     if (currentFile) {
@@ -76,7 +81,8 @@ export default function ConfigPanel() {
         name: profileName,
         bootMarkerRegex: bootInput,
         logLevelRegex: levelInput,
-        timestampRegex: timestampInput
+        timestampRegex: timestampInput,
+        timeGapThreshold: timeGapInput
       });
     } else {
       const newProfile: LogProfile = {
@@ -84,7 +90,8 @@ export default function ConfigPanel() {
         name: profileName || '新预设',
         bootMarkerRegex: bootInput,
         logLevelRegex: levelInput,
-        timestampRegex: timestampInput
+        timestampRegex: timestampInput,
+        timeGapThreshold: timeGapInput
       };
       addProfile(newProfile);
       setActiveProfile(newProfile.id);
@@ -233,8 +240,19 @@ export default function ConfigPanel() {
           placeholder="例如: \[(.*?)\]"
           className="w-full px-3 py-2 bg-gray-800 text-white rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm font-mono"
         />
+        <div className="flex items-center justify-between mt-3">
+          <h3 className="text-sm font-semibold text-gray-400">时间间隙切分会话 (秒)</h3>
+          <span className="text-[10px] text-gray-500">0 表示禁用</span>
+        </div>
+        <input
+          type="number"
+          min="0"
+          value={timeGapInput}
+          onChange={(e) => setTimeGapInput(parseInt(e.target.value) || 0)}
+          className="w-full px-3 py-2 bg-gray-800 text-blue-400 rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm font-bold"
+        />
         <p className="text-[10px] text-gray-500 mt-1">
-          提示：提取方括号内的时间，支持带串口前缀的日志
+          提示：当相邻两行的时间超过此阈值时自动创建新会话
         </p>
       </div>
 

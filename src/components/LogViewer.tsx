@@ -15,15 +15,17 @@ export default function LogViewer() {
   const showOnlyHighlights = useLogStore((state) => state.showOnlyHighlights);
   const timestampRegex = useLogStore((state) => state.timestampRegex);
   const highlightedLine = useLogStore((state) => state.flashLine); 
-  const subSearchTerm = useLogStore((state) => state.subSearchTerm);
-  const setSubSearchTerm = useLogStore((state) => state.setSubSearchTerm);
+  const refinementFilters = useLogStore((state) => state.refinementFilters);
+  const addRefinementFilter = useLogStore((state) => state.addRefinementFilter);
+  const removeRefinementFilter = useLogStore((state) => state.removeRefinementFilter);
+  const setTransientRefinement = useLogStore((state) => state.setTransientRefinement);
   const currentFileId = useLogStore((state) => state.currentFileId);
   const files = useLogStore((state) => state.files);
   const currentSessionIds = useLogStore((state) => state.selectedSessionIds);
   const currentFile = files.find(f => f.id === currentFileId);
 
-  // 本地搜索项（用于防抖）
-  const [localSearch, setLocalSearch] = useState(subSearchTerm);
+  // 本地搜索项
+  const [localSearch, setLocalSearch] = useState('');
 
   // 三级过滤器逻辑：现在已经移至后端处理
   const displayIndices = filteredIndices;
@@ -34,21 +36,6 @@ export default function LogViewer() {
   const isProgrammaticScroll = useRef(false);
   const fetchTimeoutRef = useRef<any>(null);
   const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
-
-  // 同步本地搜索项到全局 store（防抖）
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (localSearch !== subSearchTerm) {
-        setSubSearchTerm(localSearch);
-      }
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [localSearch]);
-
-  // 当全局 store 的 subSearchTerm 被外部清空时，同步本地状态
-  useEffect(() => {
-    setLocalSearch(subSearchTerm);
-  }, [subSearchTerm]);
 
   // 辅助函数：计算时间差
   const calculateTimeDelta = (currentContent: string, previousContent: string) => {
@@ -301,26 +288,59 @@ export default function LogViewer() {
 
           {/* 三级：踪迹/模式 (如果有的话) */}
           {showOnlyHighlights && (
-            <div className="flex items-center bg-emerald-900/30 text-emerald-300 px-2 py-0.5 rounded border border-emerald-800/50">
-               <span className="opacity-60 mr-1 text-[10px]">🎯</span>
-               踪迹模式
-            </div>
+            <>
+              <div className="flex items-center bg-emerald-900/30 text-emerald-300 px-2 py-0.5 rounded border border-emerald-800/50">
+                 <span className="opacity-60 mr-1 text-[10px]">🎯</span>
+                 踪迹模式
+              </div>
+              {refinementFilters.length > 0 && <span className="text-gray-700">/</span>}
+            </>
           )}
+
+          {/* 四级及以上：精细过滤器 */}
+          {refinementFilters.map((filter, idx) => (
+            <div key={idx} className="flex items-center space-x-1">
+              <div className="group flex items-center bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-700/50 hover:border-blue-500/50 transition-colors">
+                <span className="opacity-60 mr-1 text-[10px]">🔎</span>
+                {filter}
+                <button 
+                  onClick={() => removeRefinementFilter(idx)}
+                  className="ml-1.5 text-blue-500 hover:text-red-400 font-bold"
+                >
+                  ×
+                </button>
+              </div>
+              {idx < refinementFilters.length - 1 && <span className="text-gray-700">/</span>}
+            </div>
+          ))}
         </div>
 
-        {/* 三级/四级：即时搜索 */}
-        <div className="flex items-center ml-4 relative min-w-[200px] flex-1 max-w-md">
+        <div className="flex items-center ml-4 relative min-w-[200px] flex-1 max-w-sm">
           <input
             type="text"
-            placeholder="在当前结果中搜索关键字..."
+            placeholder="实时过滤并回车固化..."
             value={localSearch}
-            onChange={(e) => setLocalSearch(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setLocalSearch(val);
+              setTransientRefinement(val);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && localSearch.trim()) {
+                addRefinementFilter(localSearch.trim());
+                setLocalSearch('');
+                setTransientRefinement('');
+              }
+            }}
             className="w-full bg-gray-800 border border-gray-700 rounded-full px-8 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-600"
           />
-          <span className="absolute left-3 top-1.5 text-gray-600">🔍</span>
+          <span className="absolute left-3 top-1.5 text-gray-600">➕</span>
           {localSearch && (
             <button 
-              onClick={() => setLocalSearch('')}
+              onClick={() => {
+                setLocalSearch('');
+                setTransientRefinement('');
+              }}
               className="absolute right-3 top-1.5 text-gray-400 hover:text-white"
             >
               ✕

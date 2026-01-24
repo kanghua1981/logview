@@ -17,12 +17,17 @@ export default function KeyPathTracker() {
     setScrollTargetLine,
     exportHighlights,
     importHighlights,
-    filteredIndices
+    filteredIndices,
+    refinementFilters,
+    addRefinementFilter,
+    removeRefinementFilter,
+    setTransientRefinement
   } = useLogStore();
 
   const [exporting, setExporting] = useState(false);
 
   const [input, setInput] = useState('');
+  const [refinementInput, setRefinementInput] = useState('');
 
   // 计算每个关键字的出现次数和行号 (仅基于当前缓存的行)
   const highlightStats = useMemo(() => {
@@ -206,24 +211,83 @@ export default function KeyPathTracker() {
         </div>
       </div>
 
-      <div className="flex space-x-2">
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-          placeholder="输入关键字追踪逻辑..."
-          className="flex-1 px-3 py-2 bg-gray-800 text-white rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm"
-        />
-        <button
-          onClick={handleAdd}
-          className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm font-medium"
-        >
-          添加
-        </button>
+      <div className="flex flex-col space-y-2">
+        <label className="text-[10px] font-bold text-gray-600 uppercase">1. 定义踪迹 (OR)</label>
+        <div className="flex space-x-2">
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
+            placeholder="输入关键字..."
+            className="flex-1 px-3 py-2 bg-gray-800 text-white rounded-lg border border-gray-700 focus:border-blue-500 focus:outline-none text-sm"
+          />
+          <button
+            onClick={handleAdd}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors text-sm font-medium"
+          >
+            添加
+          </button>
+        </div>
       </div>
 
-      <div className="space-y-2">
+      <div className="flex flex-col space-y-2 pt-2 border-t border-gray-800/50">
+        <label className="text-[10px] font-bold text-gray-500 uppercase">2. 级联精简 (AND)</label>
+        <div className="flex space-x-2">
+          <input
+            type="text"
+            value={refinementInput}
+            onChange={(e) => {
+              const val = e.target.value;
+              setRefinementInput(val);
+              setTransientRefinement(val);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && refinementInput.trim()) {
+                addRefinementFilter(refinementInput.trim());
+                setRefinementInput('');
+                setTransientRefinement('');
+              }
+            }}
+            placeholder="进一步缩小范围..."
+            className="flex-1 px-3 py-2 bg-gray-900/50 text-white rounded-lg border border-gray-700/50 focus:border-blue-500/50 focus:outline-none text-sm placeholder:text-gray-600"
+          />
+          <button
+            onClick={() => {
+              if (refinementInput.trim()) {
+                addRefinementFilter(refinementInput.trim());
+                setRefinementInput('');
+                setTransientRefinement('');
+              }
+            }}
+            className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-blue-400 rounded-lg transition-colors text-sm border border-gray-700"
+          >
+            追加
+          </button>
+        </div>
+
+        {/* 精简器列表 */}
+        {refinementFilters.length > 0 && (
+          <div className="flex flex-wrap gap-2 pt-1">
+            {refinementFilters.map((filter, idx) => (
+              <div key={idx} className="flex items-center bg-blue-900/20 text-blue-400 px-2 py-1 rounded-md border border-blue-800/30 text-[11px] group">
+                <span className="opacity-50 mr-1">🔍</span>
+                {filter}
+                <button 
+                  onClick={() => removeRefinementFilter(idx)}
+                  className="ml-2 hover:text-red-400"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="pt-2 border-t border-gray-800/50">
+        <label className="text-[10px] font-bold text-gray-600 uppercase mb-2 block">已添加的踪迹关键字</label>
+        <div className="space-y-2">
         {highlights.length === 0 ? (
           <p className="text-center text-gray-600 text-xs py-4 italic">
             添加关键字，通过不同颜色梳理复杂流程
@@ -281,6 +345,7 @@ export default function KeyPathTracker() {
             </div>
           ))
         )}
+        </div>
       </div>
 
       <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700/50 rounded-lg">

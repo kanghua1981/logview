@@ -42,6 +42,7 @@ export interface LogProfile {
   bootMarkerRegex: string;
   logLevelRegex: string;
   timestampRegex: string;
+  timeGapThreshold?: number;
 }
 
 const DEFAULT_PROFILES: LogProfile[] = [
@@ -98,6 +99,7 @@ interface LogViewState {
   bootMarkerRegex: string;
   logLevelRegex: string;
   timestampRegex: string;
+  timeGapThreshold: number; // 新增：时间间隙阈值（秒），0 表示禁用
   logLevelFilter: string[];
   highlights: LogHighlight[];
   highlightContextLines: number;
@@ -118,7 +120,8 @@ interface LogViewState {
 
   // 字体大小
   fontSize: number;
-  subSearchTerm: string;
+  refinementFilters: string[];
+  transientRefinement: string;
 
   // 新增指标追踪
   metrics: LogMetric[];
@@ -147,6 +150,7 @@ interface LogViewState {
   updateSessionSplitter: (id: string, regex: string) => void;
   setActiveSessionMode: (mode: 'boot' | 'custom') => void;
   applySessionSplitters: () => Promise<void>;
+  setTimeGapThreshold: (threshold: number) => void;
   setTimestampRegex: (regex: string) => void;
   setBootMarkerRegex: (regex: string) => void;
   setLogLevelRegex: (regex: string) => void;
@@ -175,7 +179,10 @@ interface LogViewState {
   setSearchPanelOpen: (open: boolean) => void;
   setSearchOnlySelectedSessions: (only: boolean) => void;
   setSearchRegex: (isRegex: boolean) => void;
-  setSubSearchTerm: (term: string) => void;
+  addRefinementFilter: (term: string) => void;
+  removeRefinementFilter: (index: number) => void;
+  setRefinementFilters: (filters: string[]) => void;
+  setTransientRefinement: (term: string) => void;
   setFontSize: (size: number | ((prev: number) => number)) => void;
 
   // 新增指标 Actions
@@ -208,14 +215,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   filteredIndices: [],
   profiles: JSON.parse(localStorage.getItem('log_profiles') || JSON.stringify(DEFAULT_PROFILES)),
   activeProfileId: localStorage.getItem('active_profile_id') || 'default',
-  bootMarkerRegex: '',
-  logLevelRegex: '',
-  timestampRegex: '\\[(.*?)\\]', // 修改：不再强制要求在行首，以兼容带串口前缀的日志
-  logLevelFilter: ['DEBUG', 'INFO', 'NORM', 'WARN', 'ERROR', 'FATAL', 'TRACE', 'SUCCESS'],
-  highlights: [],
-  highlightContextLines: 0,
-  showOnlyHighlights: false,
-  metrics: [],
+  bootMarkerRegex: localStorage.getItem('boot_marker_regex') || '',
+  logLevelRegex: localStorage.getItem('log_level_regex') || '',
+  timestampRegex: localStorage.getItem('timestamp_regex') || '\\[(.*?)\\]', 
+  timeGapThreshold: Number(localStorage.getItem('time_gap_threshold')) || 0,
+  logLevelFilter: JSON.parse(localStorage.getItem('log_level_filter') || '["DEBUG", "INFO", "NORM", "WARN", "ERROR", "FATAL", "TRACE", "SUCCESS"]'),
+  highlights: JSON.parse(localStorage.getItem('highlights') || '[]'),
+  highlightContextLines: Number(localStorage.getItem('highlight_context_lines')) || 0,
+  showOnlyHighlights: localStorage.getItem('show_only_highlights') === 'true',
+  metrics: JSON.parse(localStorage.getItem('metrics') || '[]'),
   scrollTargetLine: null,
   flashLine: null,
   currentVisibleLine: 1,
@@ -226,7 +234,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   searchOnlySelectedSessions: false,
   isSearchRegex: false,
   fontSize: Number(localStorage.getItem('font_size')) || 12,
-  subSearchTerm: '',
+  refinementFilters: [],
+  transientRefinement: '',
   analysisStats: [],
   analysisTimeGaps: [],
   analysisWorkflows: [],
@@ -257,6 +266,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       lineCount: isCurrent ? 0 : state.lineCount,
       lineContents: isCurrent ? new Map() : state.lineContents,
       filteredIndices: isCurrent ? [] : state.filteredIndices,
+      refinementFilters: isCurrent ? [] : state.refinementFilters,
+      transientRefinement: isCurrent ? '' : state.transientRefinement,
       sessions: isCurrent ? [] : state.sessions,
       selectedSessionIds: isCurrent ? [] : state.selectedSessionIds,
       metrics: isCurrent ? state.metrics.map(m => ({ ...m, data: [] })) : state.metrics,
@@ -277,6 +288,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     filteredIndices: [],
     sessions: [],
     selectedSessionIds: [],
+    refinementFilters: [],
+    transientRefinement: '',
     metrics: state.metrics.map(m => ({ ...m, data: [] })),
     scrollTargetLine: null,
     analysisStats: [],
@@ -304,10 +317,24 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     get().filterLogLines();
   },
 
-  setTimestampRegex: (regex) => set({ timestampRegex: regex }),
-  setBootMarkerRegex: (regex) => set({ bootMarkerRegex: regex }),
-  setLogLevelRegex: (regex) => set({ logLevelRegex: regex }),
+  setTimeGapThreshold: (threshold) => {
+    localStorage.setItem('time_gap_threshold', threshold.toString());
+    set({ timeGapThreshold: threshold });
+  },
+  setTimestampRegex: (regex) => {
+    localStorage.setItem('timestamp_regex', regex);
+    set({ timestampRegex: regex });
+  },
+  setBootMarkerRegex: (regex) => {
+    localStorage.setItem('boot_marker_regex', regex);
+    set({ bootMarkerRegex: regex });
+  },
+  setLogLevelRegex: (regex) => {
+    localStorage.setItem('log_level_regex', regex);
+    set({ logLevelRegex: regex });
+  },
   setLogLevelFilter: (levels) => {
+    localStorage.setItem('log_level_filter', JSON.stringify(levels));
     set({ logLevelFilter: levels });
     get().filterLogLines();
   },
@@ -330,27 +357,33 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       color: colors[state.highlights.length % colors.length],
       enabled: true
     };
-    const newState = { highlights: [...state.highlights, newHighlight] };
+    const newHighlights = [...state.highlights, newHighlight];
+    localStorage.setItem('highlights', JSON.stringify(newHighlights));
+    const newState = { highlights: newHighlights };
     setTimeout(() => get().filterLogLines(), 0);
     return newState;
   }),
   removeHighlight: (id) => set((state) => {
-    const newState = { highlights: state.highlights.filter(h => h.id !== id) };
+    const newHighlights = state.highlights.filter(h => h.id !== id);
+    localStorage.setItem('highlights', JSON.stringify(newHighlights));
+    const newState = { highlights: newHighlights };
     setTimeout(() => get().filterLogLines(), 0);
     return newState;
   }),
   toggleHighlight: (id) => set((state) => {
-    const newState = { 
-      highlights: state.highlights.map(h => h.id === id ? { ...h, enabled: !h.enabled } : h) 
-    };
+    const newHighlights = state.highlights.map(h => h.id === id ? { ...h, enabled: !h.enabled } : h);
+    localStorage.setItem('highlights', JSON.stringify(newHighlights));
+    const newState = { highlights: newHighlights };
     setTimeout(() => get().filterLogLines(), 0);
     return newState;
   }),
   setShowOnlyHighlights: (show) => {
+    localStorage.setItem('show_only_highlights', show.toString());
     set({ showOnlyHighlights: show });
     get().filterLogLines();
   },
   setHighlightContextLines: (lines) => {
+    localStorage.setItem('highlight_context_lines', lines.toString());
     set({ highlightContextLines: lines });
     get().filterLogLines();
   },
@@ -377,11 +410,17 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     const profile = state.profiles.find(p => p.id === id);
     if (profile) {
       localStorage.setItem('active_profile_id', id);
+      localStorage.setItem('boot_marker_regex', profile.bootMarkerRegex);
+      localStorage.setItem('log_level_regex', profile.logLevelRegex);
+      localStorage.setItem('timestamp_regex', profile.timestampRegex || '\\[(.*?)\\]');
+      localStorage.setItem('time_gap_threshold', (profile.timeGapThreshold || 0).toString());
+      
       return { 
         activeProfileId: id,
         bootMarkerRegex: profile.bootMarkerRegex,
         logLevelRegex: profile.logLevelRegex,
-        timestampRegex: profile.timestampRegex || '\\[(.*?)\\]'
+        timestampRegex: profile.timestampRegex || '\\[(.*?)\\]',
+        timeGapThreshold: profile.timeGapThreshold || 0
       };
     }
     return state;
@@ -393,9 +432,21 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setCurrentVisibleLine: (line) => set({ currentVisibleLine: line }),
   
   setSearchQuery: (query) => set({ searchQuery: query }),
-  setSubSearchTerm: (term) => {
-    set({ subSearchTerm: term });
-    // 当即时搜索项改变时，重新触发过滤
+  addRefinementFilter: (term) => {
+    if (!term.trim()) return;
+    set(state => ({ refinementFilters: [...state.refinementFilters, term.trim()] }));
+    get().filterLogLines();
+  },
+  removeRefinementFilter: (index) => {
+    set(state => ({ refinementFilters: state.refinementFilters.filter((_, i) => i !== index) }));
+    get().filterLogLines();
+  },
+  setRefinementFilters: (filters) => {
+    set({ refinementFilters: filters });
+    get().filterLogLines();
+  },
+  setTransientRefinement: (term) => {
+    set({ transientRefinement: term });
     get().filterLogLines();
   },
   setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
@@ -463,29 +514,35 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   // 指标 Actions 实现
   addMetric: (name, regex) => set((state) => {
     const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981'];
-    return {
-      metrics: [...state.metrics, {
-        id: Date.now().toString(),
-        name,
-        regex,
-        data: [],
-        color: colors[state.metrics.length % colors.length],
-        enabled: true
-      }]
-    };
+    const newMetrics = [...state.metrics, {
+      id: Date.now().toString(),
+      name,
+      regex,
+      data: [],
+      color: colors[state.metrics.length % colors.length],
+      enabled: true
+    }];
+    localStorage.setItem('metrics', JSON.stringify(newMetrics));
+    return { metrics: newMetrics };
   }),
-  removeMetric: (id) => set((state) => ({
-    metrics: state.metrics.filter(m => m.id !== id)
-  })),
-  updateMetricRegex: (id, regex) => set((state) => ({
-    metrics: state.metrics.map(m => m.id === id ? { ...m, regex, data: [] } : m)
-  })),
+  removeMetric: (id) => set((state) => {
+    const newMetrics = state.metrics.filter(m => m.id !== id);
+    localStorage.setItem('metrics', JSON.stringify(newMetrics));
+    return { metrics: newMetrics };
+  }),
+  updateMetricRegex: (id, regex) => set((state) => {
+    const newMetrics = state.metrics.map(m => m.id === id ? { ...m, regex, data: [] } : m);
+    localStorage.setItem('metrics', JSON.stringify(newMetrics));
+    return { metrics: newMetrics };
+  }),
   updateMetricData: (id, data) => set((state) => ({
     metrics: state.metrics.map(m => m.id === id ? { ...m, data } : m)
   })),
-  toggleMetric: (id) => set((state) => ({
-    metrics: state.metrics.map(m => m.id === id ? { ...m, enabled: !m.enabled } : m)
-  })),
+  toggleMetric: (id) => set((state) => {
+    const newMetrics = state.metrics.map(m => m.id === id ? { ...m, enabled: !m.enabled } : m);
+    localStorage.setItem('metrics', JSON.stringify(newMetrics));
+    return { metrics: newMetrics };
+  }),
   exportConfig: () => {
     const state = get();
     const config = {
@@ -495,6 +552,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         bootMarkerRegex: state.bootMarkerRegex,
         logLevelRegex: state.logLevelRegex,
         timestampRegex: state.timestampRegex,
+        timeGapThreshold: state.timeGapThreshold,
         logLevelFilter: state.logLevelFilter,
         activeSessionMode: state.activeSessionMode,
       },
@@ -516,6 +574,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         bootMarkerRegex: config.analysis.bootMarkerRegex || '',
         logLevelRegex: config.analysis.logLevelRegex || '',
         timestampRegex: config.analysis.timestampRegex || '',
+        timeGapThreshold: config.analysis.timeGapThreshold || 0,
         logLevelFilter: config.analysis.logLevelFilter || [],
         activeSessionMode: config.analysis.activeSessionMode || 'boot',
         sessionSplitters: config.sessionSplitters || [],
@@ -526,6 +585,16 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       // 同步到本地存储
       localStorage.setItem('session_splitters', JSON.stringify(config.sessionSplitters || []));
       localStorage.setItem('active_session_mode', config.analysis.activeSessionMode || 'boot');
+      localStorage.setItem('highlights', JSON.stringify(config.highlights || []));
+      localStorage.setItem('metrics', JSON.stringify(config.metrics || []));
+      localStorage.setItem('boot_marker_regex', config.analysis.bootMarkerRegex || '');
+      localStorage.setItem('log_level_regex', config.analysis.logLevelRegex || '');
+      localStorage.setItem('timestamp_regex', config.analysis.timestampRegex || '');
+      localStorage.setItem('time_gap_threshold', (config.analysis.timeGapThreshold || 0).toString());
+      localStorage.setItem('log_level_filter', JSON.stringify(config.analysis.logLevelFilter || []));
+      
+      // 触发一次过滤
+      setTimeout(() => get().filterLogLines(), 0);
       
       return true;
     } catch (err) {
@@ -550,6 +619,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         return false;
       }
       set({ highlights: data.highlights });
+      localStorage.setItem('highlights', JSON.stringify(data.highlights));
       get().filterLogLines();
       return true;
     } catch (e) {
@@ -647,7 +717,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         lineRanges: lineRanges,
         highlights: activeHighlights,
         contextLines: showOnlyHighlights ? highlightContextLines : 0,
-        subSearch: get().subSearchTerm
+        refinements: [...get().refinementFilters, get().transientRefinement].filter(r => r.trim() !== '')
       });
       
       set({ filteredIndices: indices });
@@ -667,9 +737,9 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   },
 }));
 
-// Initialize active profile
+// Initialize active profile if no saved regex found
 const initialState = useLogStore.getState();
-if (initialState.profiles.length > 0) {
+if (!localStorage.getItem('boot_marker_regex') && initialState.profiles.length > 0) {
   const activeProfile = initialState.profiles.find(p => p.id === initialState.activeProfileId) || initialState.profiles[0];
   useLogStore.setState({
     bootMarkerRegex: activeProfile.bootMarkerRegex,

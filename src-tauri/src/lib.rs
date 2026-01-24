@@ -240,9 +240,11 @@ async fn parse_log_file(
 
 #[tauri::command]
 async fn parse_log_content(
-    path: String, // 兼容以前的签名
+    path: String,
     boot_regex: String,
     level_regex: String,
+    timestamp_regex: String,
+    time_gap_threshold: f64,
     state: State<'_, AppState>
 ) -> Result<ParsedLog, String> {
     let index_opt = {
@@ -254,8 +256,6 @@ async fn parse_log_content(
         let bytes = &index.mmap[..];
         let line_count = index.offsets.len();
         
-        // 我们不发送全文 lines 给前端了，只发送基础 Session 和空的 lines (为了兼容逻辑)
-        // 实际上后续前端会通过 get_log_range 请求数据
         let mut sessions = Vec::new();
         let mut current_session_start = 1;
         let mut session_id = 0;
@@ -266,22 +266,58 @@ async fn parse_log_content(
             Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").ok()
         };
 
+        let ts_re = if !timestamp_regex.is_empty() {
+            Regex::new(&timestamp_regex).ok()
+        } else {
+            None
+        };
+
+        let mut last_time: Option<f64> = None;
+
         for idx in 0..line_count {
+            let start = index.offsets[idx];
+            let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
+            let line_bytes = &bytes[start..end];
+            let line_str = bytes_to_string_with_encoding(line_bytes, index.encoding);
+
+            let mut split_session = false;
+            let mut boot_marker = String::new();
+
+            // 1. 基于 Boot 标识符切分
             if let Some(ref re) = boot_re {
-                let start = index.offsets[idx];
-                let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
-                let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
-                
                 if re.is_match(&line_str) && idx > 0 {
-                    sessions.push(LogSession {
-                        id: session_id,
-                        start_line: current_session_start,
-                        end_line: idx,
-                        boot_marker: line_str.trim().to_string(),
-                    });
-                    session_id += 1;
-                    current_session_start = idx + 1;
+                    split_session = true;
+                    boot_marker = line_str.trim().to_string();
                 }
+            }
+
+            // 2. 基于时间间隙切分
+            if !split_session && time_gap_threshold > 0.0 {
+                if let Some(ref re) = ts_re {
+                    if let Some(caps) = re.captures(&line_str) {
+                        let ts_str = caps.get(1).map(|m| m.as_str()).unwrap_or(caps.get(0).unwrap().as_str());
+                        if let Some(current_time) = try_parse_timestamp(ts_str) {
+                            if let Some(last) = last_time {
+                                if (current_time - last).abs() > time_gap_threshold {
+                                    split_session = true;
+                                    boot_marker = format!("Time Gap Detected: {:.2}s", current_time - last);
+                                }
+                            }
+                            last_time = Some(current_time);
+                        }
+                    }
+                }
+            }
+
+            if split_session && idx > 0 {
+                sessions.push(LogSession {
+                    id: session_id,
+                    start_line: current_session_start,
+                    end_line: idx,
+                    boot_marker: if boot_marker.is_empty() { line_str.trim().to_string() } else { boot_marker },
+                });
+                session_id += 1;
+                current_session_start = idx + 1;
             }
         }
 
@@ -293,7 +329,6 @@ async fn parse_log_content(
             boot_marker: if line_count > 0 { "End of File".to_string() } else { "Full Log".to_string() },
         });
 
-        // 返回时带上级别元数据 (但不带 content，减少序列化压力)
         let levels = index.levels.clone();
 
         Ok(ParsedLog {
@@ -302,10 +337,44 @@ async fn parse_log_content(
             levels,
         })
     } else {
-        // 如果状态中没有索引，尝试重新解析 (或者返回错误)
-        // 这里我们选择返回错误，因为 parse_log_file 应该先被调用
         Err("No file opened or index missing. Call parse_log_file first.".to_string())
     }
+}
+
+// 辅助函数：尝试解析时间戳
+fn try_parse_timestamp(s: &str) -> Option<f64> {
+    let s = s.trim();
+    // 1. 尝试解析为纯数字（如内核秒数 [123.456]）
+    if let Ok(val) = s.parse::<f64>() {
+        return Some(val);
+    }
+
+    // 2. 尝试解析常见日期时间格式
+    // 这里我们可以尝试几种常见格式，或者使用更强大的解析库
+    // 简便起见，我们尝试几种模式
+    let formats = [
+        "%Y-%m-%d %H:%M:%S%.3f",
+        "%Y-%m-%d %H:%M:%S",
+        "%H:%M:%S%.3f",
+        "%H:%M:%S",
+    ];
+
+    for fmt in formats {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, fmt) {
+            return Some(dt.and_utc().timestamp() as f64 + dt.and_utc().timestamp_subsec_nanos() as f64 / 1_000_000_000.0);
+        }
+    }
+
+    // 如果包含日期和时间，但不是标准格式，尝试部分匹配
+    // 或者针对 [2026-01-22_21:18:34.723] 这种带下划线的
+    let s_clean = s.replace('_', " ").replace('T', " ");
+    for fmt in formats {
+        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(&s_clean, fmt) {
+            return Some(dt.and_utc().timestamp() as f64 + dt.and_utc().timestamp_subsec_nanos() as f64 / 1_000_000_000.0);
+        }
+    }
+
+    None
 }
 
 #[tauri::command]
@@ -1020,7 +1089,7 @@ async fn get_filtered_indices(
     line_ranges: Option<Vec<(usize, usize)>>,
     highlights: Vec<String>,
     context_lines: usize,
-    sub_search: Option<String>,
+    refinements: Vec<String>,
     state: State<'_, AppState>
 ) -> Result<Vec<usize>, String> {
     let index = state.current_index.lock().unwrap().clone()
@@ -1038,7 +1107,10 @@ async fn get_filtered_indices(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let sub_search_lower = sub_search.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+    let refinements_lower: Vec<String> = refinements.iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     let matches: Vec<bool> = (0..line_count).into_par_iter().map(|idx| {
         if let Some(ref ranges) = line_ranges {
@@ -1051,23 +1123,18 @@ async fn get_filtered_indices(
             if !levels_set.contains(&cur_lv) { return false; }
         }
 
-        // 基础过滤（脱水/踪迹模式产生的关键字）
-        let mut base_match = keywords.is_empty();
-        if !base_match {
-            let start = offsets[idx];
-            let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
-            let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
-            base_match = keywords.iter().any(|k| line_str.contains(k));
+        let start = offsets[idx];
+        let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+        let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
+
+        // 基础过滤（脱水/踪迹模式产生的关键字）- OR 关系
+        if !keywords.is_empty() {
+            if !keywords.iter().any(|k| line_str.contains(k)) { return false; }
         }
 
-        if !base_match { return false; }
-
-        // 第三级：即时搜索过滤
-        if let Some(ref sub_k) = sub_search_lower {
-            let start = offsets[idx];
-            let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
-            let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
-            if !line_str.contains(sub_k) { return false; }
+        // 多级精细过滤 - AND 关系
+        for ref_k in &refinements_lower {
+            if !line_str.contains(ref_k) { return false; }
         }
 
         true
