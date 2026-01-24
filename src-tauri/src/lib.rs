@@ -1248,6 +1248,39 @@ async fn save_filtered_logs(
     Ok(())
 }
 
+#[tauri::command]
+async fn find_first_occurrence(
+    query: String,
+    line_ranges: Option<Vec<(usize, usize)>>,
+    state: State<'_, AppState>
+) -> Result<Option<usize>, String> {
+    let index = state.current_index.lock().unwrap().clone()
+        .ok_or("No file opened")?;
+    
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+    let line_count = offsets.len();
+    let query_lower = query.to_lowercase();
+
+    // 并行查找第一个匹配项
+    let first_match = (0..line_count).into_par_iter().find_first(|&idx| {
+        // 范围检查
+        if let Some(ref ranges) = line_ranges {
+            let ln = idx + 1; // 1-based line number for comparison with session ranges
+            if !ranges.iter().any(|(s, e)| ln >= *s && ln <= *e) { return false; }
+        }
+
+        let start = offsets[idx];
+        let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+        let line_bytes = &bytes[start..end];
+        let line_str = bytes_to_string_with_encoding(line_bytes, index.encoding).to_lowercase();
+        
+        line_str.contains(&query_lower)
+    });
+
+    Ok(first_match)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1287,7 +1320,8 @@ pub fn run() {
             save_sessions,
             save_filtered_logs,
             write_config_file,
-            read_config_file
+            read_config_file,
+            find_first_occurrence
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -4,6 +4,8 @@ import { useLogStore } from '../store';
 import { loadLogFile } from './FileManager';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { processCommand } from '../utils/commandProcessor';
+import { save, open } from '@tauri-apps/plugin-dialog';
 
 export default function LogViewer() {
   const filteredIndices = useLogStore((state) => state.filteredIndices);
@@ -27,8 +29,9 @@ export default function LogViewer() {
 
   // 本地搜索项
   const [localSearch, setLocalSearch] = useState('');
-  const [refinementMode, setRefinementMode] = useState<'include' | 'exclude' | 'regex' | 'exact' | 'ai'>('include');
+  const [refinementMode, setRefinementMode] = useState<'include' | 'exclude' | 'regex' | 'exact' | 'ai' | 'command' | 'time'>('include');
   const filterInputRef = useRef<HTMLInputElement>(null);
+  const [exporting, setExporting] = useState(false);
 
   // 重要：定义 displayIndices。目前它等同于 filteredIndices，
   // 因为实时搜索已经集成到了后端过滤逻辑中。
@@ -40,13 +43,38 @@ export default function LogViewer() {
   const isProgrammaticScroll = useRef(false);
   const fetchTimeoutRef = useRef<any>(null);
   const lastUpdateRef = useRef<number>(0);
+  const handleExportResult = async () => {
+    if (displayIndices.length === 0) return;
+    
+    try {
+      setExporting(true);
+      const path = await save({
+        filters: [{ name: 'Log File', extensions: ['log', 'txt'] }],
+        defaultPath: `export_result_${new Date().getTime()}.log`
+      });
 
-  // 获取模式对应的 UI 配置
+      if (path) {
+        await invoke('save_filtered_logs', { 
+          path, 
+          indices: displayIndices 
+        });
+        alert('导出成功！');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('导出失败: ' + e);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const getRefinementInfo = (filter: string) => {
     if (filter.startsWith('!')) return { label: 'Exclude', text: filter.substring(1), icon: '✕', color: 'text-red-400', bg: 'bg-red-900/40', border: 'border-red-900/50' };
     if (filter.startsWith('/')) return { label: 'Regex', text: filter.substring(1), icon: '◈', color: 'text-purple-400', bg: 'bg-purple-900/40', border: 'border-purple-900/50' };
     if (filter.startsWith('=')) return { label: 'Exact', text: filter.substring(1), icon: '≡', color: 'text-emerald-400', bg: 'bg-emerald-900/40', border: 'border-emerald-900/50' };
     if (filter.startsWith('?')) return { label: 'AI', text: filter.substring(1), icon: '✨', color: 'text-blue-400', bg: 'bg-blue-900/40', border: 'border-blue-900/50' };
+    if (filter.startsWith(':')) return { label: 'Command', text: filter.substring(1), icon: '⌨', color: 'text-amber-400', bg: 'bg-amber-900/40', border: 'border-amber-900/50' };
+    if (filter.startsWith('@')) return { label: 'Time', text: filter.substring(1), icon: '🕒', color: 'text-cyan-400', bg: 'bg-cyan-900/40', border: 'border-cyan-900/50' };
     return { label: 'Include', text: filter, icon: '🔎', color: 'text-blue-300', bg: 'bg-blue-900/40', border: 'border-blue-700/50' };
   };
 
@@ -56,6 +84,8 @@ export default function LogViewer() {
       case 'regex': return { label: 'Regex', color: 'text-purple-400', bg: 'bg-purple-500/20', prefix: '/' };
       case 'exact': return { label: 'Exact', color: 'text-emerald-400', bg: 'bg-emerald-500/20', prefix: '=' };
       case 'ai': return { label: 'AI', color: 'text-blue-400', bg: 'bg-blue-500/20', prefix: '?' };
+      case 'command': return { label: 'Command', color: 'text-amber-400', bg: 'bg-amber-500/20', prefix: ':' };
+      case 'time': return { label: 'Time', color: 'text-cyan-400', bg: 'bg-cyan-500/20', prefix: '@' };
       default: return { label: 'Filter', color: 'text-gray-400', bg: 'bg-gray-800', prefix: '' };
     }
   };
@@ -100,7 +130,9 @@ export default function LogViewer() {
         '!': 'exclude',
         '/': 'regex',
         '=': 'exact',
-        '?': 'ai'
+        '?': 'ai',
+        ':': 'command',
+        '@': 'time'
       };
 
       if (prefixKeys[e.key]) {
@@ -120,7 +152,10 @@ export default function LogViewer() {
         setLocalSearch(prev => {
           const newVal = prev + e.key;
           const prefix = getActiveModeInfo().prefix;
-          setTransientRefinement(prefix + newVal);
+          // 命令和时间模式下不触发实时过滤，避免输入过程中视图消失
+          if (refinementMode !== 'command' && refinementMode !== 'time') {
+            setTransientRefinement(prefix + newVal);
+          }
           return newVal;
         });
         e.preventDefault();
@@ -133,6 +168,12 @@ export default function LogViewer() {
 
   // 当 localSearch 或 mode 变化时同步到 store
   useEffect(() => {
+    // 命令和时间模式是“指令型”而非“搜索型”，不需要实时反馈结果
+    if (refinementMode === 'command' || refinementMode === 'time') {
+      setTransientRefinement('');
+      return;
+    }
+    
     const prefix = getActiveModeInfo().prefix;
     setTransientRefinement(localSearch ? prefix + localSearch : '');
   }, [localSearch, refinementMode]);
@@ -425,18 +466,75 @@ export default function LogViewer() {
           <input
             ref={filterInputRef}
             type="text"
-            placeholder={refinementMode === 'include' ? "输入并回车锁定..." : `正在使用 ${refinementMode} 模式...`}
+            placeholder={
+              refinementMode === 'include' ? "输入并回车锁定..." : 
+              refinementMode === 'command' ? "输入命令 (如: :top, :500, :export)..." :
+              refinementMode === 'time' ? "输入时间戳跳转 (如: @10:30:05)..." :
+              `正在使用 ${refinementMode} 模式...`
+            }
             value={localSearch}
             onChange={(e) => {
               const val = e.target.value;
               setLocalSearch(val);
             }}
-            onKeyDown={(e) => {
+            onKeyDown={async (e) => {
               if (e.key === 'Enter' && localSearch.trim()) {
-                const prefix = getActiveModeInfo().prefix;
-                addRefinementFilter(prefix + localSearch.trim());
-                setLocalSearch('');
-                setRefinementMode('include');
+                const trimmedInput = localSearch.trim();
+                let targetMode = refinementMode;
+                let finalInput = trimmedInput;
+
+                // 自动识别前缀输入，即使用户没有通过快捷键切换模式
+                if (trimmedInput.startsWith(':')) {
+                  targetMode = 'command';
+                  finalInput = trimmedInput.substring(1);
+                } else if (trimmedInput.startsWith('@')) {
+                  targetMode = 'time';
+                  finalInput = trimmedInput.substring(1);
+                } else if (trimmedInput.startsWith('!')) {
+                  targetMode = 'exclude';
+                  finalInput = trimmedInput.substring(1);
+                } else if (trimmedInput.startsWith('/')) {
+                  targetMode = 'regex';
+                  finalInput = trimmedInput.substring(1);
+                } else if (trimmedInput.startsWith('=')) {
+                  targetMode = 'exact';
+                  finalInput = trimmedInput.substring(1);
+                }
+
+                if (targetMode === 'command' || targetMode === 'time') {
+                  const result = await processCommand(finalInput, targetMode);
+                  if (result.success) {
+                    if (result.action === 'export') {
+                      handleExportResult();
+                    } else if (result.action === 'open') {
+                      const path = await open({
+                        multiple: false,
+                        filters: [{
+                          name: 'Log Files',
+                          extensions: ['log', 'txt', 'out', 'txt*']
+                        }]
+                      });
+                      if (path && typeof path === 'string') {
+                        loadLogFile(path);
+                      }
+                    }
+                    setLocalSearch('');
+                    setRefinementMode('include');
+                  } else if (result.message) {
+                    alert(result.message);
+                  }
+                } else {
+                  // 对于过滤模式，依然遵循之前的逻辑，但会自动剥离手动输入的重复前缀
+                  const prefix = getActiveModeInfo().prefix;
+                  // 如果手动输入了前缀且与当前模式一致，或者处于 include 模式但输入了前缀
+                  addRefinementFilter(
+                    (targetMode !== 'include' && !trimmedInput.startsWith(prefix)) 
+                    ? prefix + finalInput 
+                    : trimmedInput
+                  );
+                  setLocalSearch('');
+                  setRefinementMode('include');
+                }
               }
             }}
             className="w-full bg-gray-950 border border-gray-800 rounded-full pl-20 pr-8 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50 placeholder-gray-700 transition-all"
@@ -455,6 +553,27 @@ export default function LogViewer() {
         </div>
 
         <div className="ml-4 shrink-0 text-gray-500 flex items-center space-x-3">
+           <button
+             onClick={handleExportResult}
+             disabled={exporting || displayIndices.length === 0}
+             title="导出当前过滤结果"
+             className={`p-1.5 rounded transition-colors ${
+               exporting || displayIndices.length === 0 
+               ? 'text-gray-700 cursor-not-allowed' 
+               : 'text-gray-400 hover:text-emerald-400 hover:bg-gray-800'
+             }`}
+           >
+             {exporting ? (
+               <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+               </svg>
+             ) : (
+               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+               </svg>
+             )}
+           </button>
            <span className="font-mono bg-gray-800 px-2 py-0.5 rounded text-[10px]">
              {displayIndices.length} / {filteredIndices.length} 行
            </span>
