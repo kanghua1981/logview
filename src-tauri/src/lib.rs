@@ -1107,53 +1107,111 @@ async fn get_filtered_indices(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let refinements_lower: Vec<String> = refinements.iter()
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
+    // 预处理多级过滤器
+    enum RefinementMode {
+        Include(String),
+        Exclude(String),
+        Regex(regex::Regex),
+        Exact(String),
+    }
+
+    let parsed_refinements: Vec<RefinementMode> = refinements.iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let s = s.trim();
+            if s.starts_with('!') {
+                RefinementMode::Exclude(s[1..].to_lowercase())
+            } else if s.starts_with('/') {
+                let pattern = if s.len() > 1 { &s[1..] } else { "" };
+                let re = regex::RegexBuilder::new(pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap_or_else(|_| regex::Regex::new("").unwrap());
+                RefinementMode::Regex(re)
+            } else if s.starts_with('=') {
+                RefinementMode::Exact(s[1..].to_string())
+            } else if s.starts_with('?') {
+                // AI 模式暂时作为普通包含匹配处理，直到接入模型
+                RefinementMode::Include(s[1..].to_lowercase())
+            } else {
+                RefinementMode::Include(s.to_lowercase())
+            }
+        })
         .collect();
 
-    let matches: Vec<bool> = (0..line_count).into_par_iter().map(|idx| {
+    // 第一阶段：确定“种子”行（Trace Keywords 或基础过滤条件）
+    let is_seed: Vec<bool> = (0..line_count).into_par_iter().map(|idx| {
+        // 范围和级别是全局基础过滤，不参与上下文扩展
         if let Some(ref ranges) = line_ranges {
             let ln = idx + 1;
             if !ranges.iter().any(|(s, e)| ln >= *s && ln <= *e) { return false; }
         }
         if !levels_set.is_empty() {
-            // 将未识别级别的行默认映射为 INFO
             let cur_lv = index.levels[idx].as_ref().map(|s| s.to_uppercase()).unwrap_or_else(|| "INFO".to_string());
             if !levels_set.contains(&cur_lv) { return false; }
         }
 
+        // 如果没有关键字，所有符合范围和级别的行都是种子
+        if keywords.is_empty() { return true; }
+
         let start = offsets[idx];
         let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
-        let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
+        let line_bytes = &bytes[start..end];
+        let line_str_original = bytes_to_string_with_encoding(line_bytes, index.encoding);
+        let line_str_lower = line_str_original.to_lowercase();
 
-        // 基础过滤（脱水/踪迹模式产生的关键字）- OR 关系
-        if !keywords.is_empty() {
-            if !keywords.iter().any(|k| line_str.contains(k)) { return false; }
-        }
-
-        // 多级精细过滤 - AND 关系
-        for ref_k in &refinements_lower {
-            if !line_str.contains(ref_k) { return false; }
-        }
-
-        true
+        keywords.iter().any(|k| line_str_lower.contains(k))
     }).collect();
 
-    let mut result = Vec::new();
+    // 第二阶段：上下文扩展（仅当有关键字且 context_lines > 0 时有效）
+    let mut in_trace = vec![false; line_count];
     if !keywords.is_empty() && context_lines > 0 {
-        let mut mask = vec![false; line_count];
+        // 串行扩展 mask（虽然增加了主线程压力，但逻辑简单可靠，对于数百万行也是毫秒级）
         for i in 0..line_count {
-            if matches[i] {
+            if is_seed[i] {
                 let start = i.saturating_sub(context_lines);
                 let end = (i + context_lines).min(line_count - 1);
-                for j in start..=end { mask[j] = true; }
+                for j in start..=end { in_trace[j] = true; }
             }
         }
-        for i in 0..line_count { if mask[i] { result.push(i); } }
     } else {
-        for i in 0..line_count { if matches[i] { result.push(i); } }
+        in_trace = is_seed;
     }
+
+    // 第三阶段：在最终的 trace 范围内应用“精简”过滤器 (Refinements)
+    let result: Vec<usize> = (0..line_count).into_par_iter().filter_map(|idx| {
+        if !in_trace[idx] { return None; }
+        
+        // 如果没有精简过滤器，直接返回
+        if parsed_refinements.is_empty() { return Some(idx); }
+
+        // 获取行内容以进行精简检查
+        let start = offsets[idx];
+        let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+        let line_bytes = &bytes[start..end];
+        let line_str_original = bytes_to_string_with_encoding(line_bytes, index.encoding);
+        let line_str_lower = line_str_original.to_lowercase();
+
+        for ref_mode in &parsed_refinements {
+            match ref_mode {
+                RefinementMode::Include(k) => {
+                    if !line_str_lower.contains(k) { return None; }
+                }
+                RefinementMode::Exclude(k) => {
+                    if line_str_lower.contains(k) { return None; }
+                }
+                RefinementMode::Regex(re) => {
+                    if !re.is_match(&line_str_original) { return None; }
+                }
+                RefinementMode::Exact(k) => {
+                    if !line_str_original.contains(k) { return None; }
+                }
+            }
+        }
+
+        Some(idx)
+    }).collect();
+
     Ok(result)
 }
 

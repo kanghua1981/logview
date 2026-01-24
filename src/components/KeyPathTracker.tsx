@@ -114,6 +114,15 @@ export default function KeyPathTracker() {
       console.error(e);
     }
   };
+
+  const getRefinementInfo = (filter: string) => {
+    if (filter.startsWith('!')) return { label: 'Exclude', text: filter.substring(1), icon: '✕', color: 'text-red-400', bg: 'bg-red-900/40', border: 'border-red-900/50' };
+    if (filter.startsWith('/')) return { label: 'Regex', text: filter.substring(1), icon: '◈', color: 'text-purple-400', bg: 'bg-purple-900/40', border: 'border-purple-900/50' };
+    if (filter.startsWith('=')) return { label: 'Exact', text: filter.substring(1), icon: '≡', color: 'text-emerald-400', bg: 'bg-emerald-900/40', border: 'border-emerald-900/50' };
+    if (filter.startsWith('?')) return { label: 'AI', text: filter.substring(1), icon: '✨', color: 'text-blue-400', bg: 'bg-blue-900/40', border: 'border-blue-900/50' };
+    return { label: 'Include', text: filter, icon: '🔎', color: 'text-blue-300', bg: 'bg-blue-900/40', border: 'border-blue-700/50' };
+  };
+
   const handleExportResult = async () => {
     if (filteredIndices.length === 0) return;
     
@@ -269,18 +278,21 @@ export default function KeyPathTracker() {
         {/* 精简器列表 */}
         {refinementFilters.length > 0 && (
           <div className="flex flex-wrap gap-2 pt-1">
-            {refinementFilters.map((filter, idx) => (
-              <div key={idx} className="flex items-center bg-blue-900/20 text-blue-400 px-2 py-1 rounded-md border border-blue-800/30 text-[11px] group">
-                <span className="opacity-50 mr-1">🔍</span>
-                {filter}
-                <button 
-                  onClick={() => removeRefinementFilter(idx)}
-                  className="ml-2 hover:text-red-400"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
+            {refinementFilters.map((filter, idx) => {
+              const info = getRefinementInfo(filter);
+              return (
+                <div key={idx} className={`flex items-center ${info.bg} ${info.color} px-2 py-1 rounded-md border ${info.border} text-[11px] group`}>
+                  <span className="opacity-50 mr-1">{info.icon}</span>
+                  {info.text}
+                  <button 
+                    onClick={() => removeRefinementFilter(idx)}
+                    className="ml-2 hover:text-red-400"
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>

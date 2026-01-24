@@ -27,17 +27,38 @@ export default function LogViewer() {
 
   // 本地搜索项
   const [localSearch, setLocalSearch] = useState('');
+  const [refinementMode, setRefinementMode] = useState<'include' | 'exclude' | 'regex' | 'exact' | 'ai'>('include');
   const filterInputRef = useRef<HTMLInputElement>(null);
 
-  // 三级过滤器逻辑：现在已经移至后端处理
+  // 重要：定义 displayIndices。目前它等同于 filteredIndices，
+  // 因为实时搜索已经集成到了后端过滤逻辑中。
   const displayIndices = filteredIndices;
 
-  const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const lastUpdateRef = useRef(0);
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
   const isProgrammaticScroll = useRef(false);
   const fetchTimeoutRef = useRef<any>(null);
-  const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
+  const lastUpdateRef = useRef<number>(0);
+
+  // 获取模式对应的 UI 配置
+  const getRefinementInfo = (filter: string) => {
+    if (filter.startsWith('!')) return { label: 'Exclude', text: filter.substring(1), icon: '✕', color: 'text-red-400', bg: 'bg-red-900/40', border: 'border-red-900/50' };
+    if (filter.startsWith('/')) return { label: 'Regex', text: filter.substring(1), icon: '◈', color: 'text-purple-400', bg: 'bg-purple-900/40', border: 'border-purple-900/50' };
+    if (filter.startsWith('=')) return { label: 'Exact', text: filter.substring(1), icon: '≡', color: 'text-emerald-400', bg: 'bg-emerald-900/40', border: 'border-emerald-900/50' };
+    if (filter.startsWith('?')) return { label: 'AI', text: filter.substring(1), icon: '✨', color: 'text-blue-400', bg: 'bg-blue-900/40', border: 'border-blue-900/50' };
+    return { label: 'Include', text: filter, icon: '🔎', color: 'text-blue-300', bg: 'bg-blue-900/40', border: 'border-blue-700/50' };
+  };
+
+  const getActiveModeInfo = () => {
+    switch (refinementMode) {
+      case 'exclude': return { label: 'Exclude', color: 'text-red-400', bg: 'bg-red-500/20', prefix: '!' };
+      case 'regex': return { label: 'Regex', color: 'text-purple-400', bg: 'bg-purple-500/20', prefix: '/' };
+      case 'exact': return { label: 'Exact', color: 'text-emerald-400', bg: 'bg-emerald-500/20', prefix: '=' };
+      case 'ai': return { label: 'AI', color: 'text-blue-400', bg: 'bg-blue-500/20', prefix: '?' };
+      default: return { label: 'Filter', color: 'text-gray-400', bg: 'bg-gray-800', prefix: '' };
+    }
+  };
 
   // 1. 全局快捷输入监听：在日志视图下，按下任何字母/数字直接进入实时过滤
   useEffect(() => {
@@ -45,15 +66,25 @@ export default function LogViewer() {
       const activeEl = document.activeElement;
       const isInputFocused = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
       
-      // A. 处理 Escape 退出/后退逻辑
+      // A. 处理 Escape 逻辑：优先退出输入框聚焦，其次才是清除内容或后退面包屑
       if (e.key === 'Escape') {
+        if (isInputFocused) {
+          (activeEl as HTMLElement).blur();
+          // 如果有正在正在预览的搜索内容，Esc 也会将其清空，方便用户重新选择模式
+          if (localSearch) {
+            setLocalSearch('');
+            setTransientRefinement('');
+            setRefinementMode('include');
+          }
+          return;
+        }
+
+        // 处于非输入状态时，Esc 作为“撤销/后退”键：先清空预览，再删除已固定的面包屑
         if (localSearch) {
-          // 如果正在输入，先清空输入并失焦
           setLocalSearch('');
           setTransientRefinement('');
-          if (isInputFocused) (activeEl as HTMLElement).blur();
+          setRefinementMode('include');
         } else if (refinementFilters.length > 0) {
-          // 如果没有正在输入，则撤销最近的一个面包屑
           removeRefinementFilter(refinementFilters.length - 1);
         }
         return;
@@ -64,12 +95,32 @@ export default function LogViewer() {
         return;
       }
 
-      // C. 字母数字直达：聚焦并带入字符
+      // C. 处理前缀切换模式逻辑
+      const prefixKeys: Record<string, typeof refinementMode> = {
+        '!': 'exclude',
+        '/': 'regex',
+        '=': 'exact',
+        '?': 'ai'
+      };
+
+      if (prefixKeys[e.key]) {
+        e.preventDefault();
+        filterInputRef.current?.focus();
+        if (refinementMode === prefixKeys[e.key]) {
+          setRefinementMode('include');
+        } else {
+          setRefinementMode(prefixKeys[e.key]);
+        }
+        return;
+      }
+
+      // D. 字母数字直达：聚焦并带入字符
       if (e.key.length === 1) {
         filterInputRef.current?.focus();
         setLocalSearch(prev => {
           const newVal = prev + e.key;
-          setTransientRefinement(newVal);
+          const prefix = getActiveModeInfo().prefix;
+          setTransientRefinement(prefix + newVal);
           return newVal;
         });
         e.preventDefault();
@@ -78,7 +129,13 @@ export default function LogViewer() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [activeView, localSearch, refinementFilters, setTransientRefinement, removeRefinementFilter]);
+  }, [activeView, localSearch, refinementFilters, refinementMode, setTransientRefinement, removeRefinementFilter]);
+
+  // 当 localSearch 或 mode 变化时同步到 store
+  useEffect(() => {
+    const prefix = getActiveModeInfo().prefix;
+    setTransientRefinement(localSearch ? prefix + localSearch : '');
+  }, [localSearch, refinementMode]);
 
   // 辅助函数：计算时间差
   const calculateTimeDelta = (currentContent: string, previousContent: string) => {
@@ -341,51 +398,56 @@ export default function LogViewer() {
           )}
 
           {/* 四级及以上：精细过滤器 */}
-          {refinementFilters.map((filter, idx) => (
-            <div key={idx} className="flex items-center space-x-1">
-              <div className="group flex items-center bg-blue-900/40 text-blue-300 px-2 py-0.5 rounded border border-blue-700/50 hover:border-blue-500/50 transition-colors">
-                <span className="opacity-60 mr-1 text-[10px]">🔎</span>
-                {filter}
-                <button 
-                  onClick={() => removeRefinementFilter(idx)}
-                  className="ml-1.5 text-blue-500 hover:text-red-400 font-bold"
-                >
-                  ×
-                </button>
+          {refinementFilters.map((filter, idx) => {
+            const info = getRefinementInfo(filter);
+            return (
+              <div key={idx} className="flex items-center space-x-1">
+                <div className={`group flex items-center ${info.bg} ${info.color} px-2 py-0.5 rounded border ${info.border} hover:border-blue-500/50 transition-colors`}>
+                  <span className="opacity-60 mr-1 text-[10px]">{info.icon}</span>
+                  {info.text}
+                  <button 
+                    onClick={() => removeRefinementFilter(idx)}
+                    className="ml-1.5 opacity-40 hover:opacity-100 hover:text-red-400 font-bold transition-all"
+                  >
+                    ×
+                  </button>
+                </div>
+                {idx < refinementFilters.length - 1 && <span className="text-gray-700">/</span>}
               </div>
-              {idx < refinementFilters.length - 1 && <span className="text-gray-700">/</span>}
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        <div className="flex items-center ml-4 relative min-w-[200px] flex-1 max-w-sm">
+        <div className="flex items-center ml-4 relative min-w-[240px] flex-1 max-w-md">
+          <div className={`absolute left-2 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase transition-all flex items-center ${getActiveModeInfo().bg} ${getActiveModeInfo().color}`}>
+            {getActiveModeInfo().label}
+          </div>
           <input
             ref={filterInputRef}
             type="text"
-            placeholder="实时过滤并回车固化..."
+            placeholder={refinementMode === 'include' ? "输入并回车锁定..." : `正在使用 ${refinementMode} 模式...`}
             value={localSearch}
             onChange={(e) => {
               const val = e.target.value;
               setLocalSearch(val);
-              setTransientRefinement(val);
             }}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && localSearch.trim()) {
-                addRefinementFilter(localSearch.trim());
+                const prefix = getActiveModeInfo().prefix;
+                addRefinementFilter(prefix + localSearch.trim());
                 setLocalSearch('');
-                setTransientRefinement('');
+                setRefinementMode('include');
               }
             }}
-            className="w-full bg-gray-800 border border-gray-700 rounded-full px-8 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-600"
+            className="w-full bg-gray-950 border border-gray-800 rounded-full pl-20 pr-8 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500/50 placeholder-gray-700 transition-all"
           />
-          <span className="absolute left-3 top-1.5 text-gray-600">➕</span>
           {localSearch && (
             <button 
               onClick={() => {
                 setLocalSearch('');
-                setTransientRefinement('');
+                setRefinementMode('include');
               }}
-              className="absolute right-3 top-1.5 text-gray-400 hover:text-white"
+              className="absolute right-3 top-1.5 text-gray-500 hover:text-white"
             >
               ✕
             </button>
