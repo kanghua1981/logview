@@ -22,10 +22,12 @@ export default function LogViewer() {
   const currentFileId = useLogStore((state) => state.currentFileId);
   const files = useLogStore((state) => state.files);
   const currentSessionIds = useLogStore((state) => state.selectedSessionIds);
+  const activeView = useLogStore((state) => state.activeView);
   const currentFile = files.find(f => f.id === currentFileId);
 
   // 本地搜索项
   const [localSearch, setLocalSearch] = useState('');
+  const filterInputRef = useRef<HTMLInputElement>(null);
 
   // 三级过滤器逻辑：现在已经移至后端处理
   const displayIndices = filteredIndices;
@@ -36,6 +38,47 @@ export default function LogViewer() {
   const isProgrammaticScroll = useRef(false);
   const fetchTimeoutRef = useRef<any>(null);
   const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
+
+  // 1. 全局快捷输入监听：在日志视图下，按下任何字母/数字直接进入实时过滤
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const activeEl = document.activeElement;
+      const isInputFocused = activeEl?.tagName === 'INPUT' || activeEl?.tagName === 'TEXTAREA';
+      
+      // A. 处理 Escape 退出/后退逻辑
+      if (e.key === 'Escape') {
+        if (localSearch) {
+          // 如果正在输入，先清空输入并失焦
+          setLocalSearch('');
+          setTransientRefinement('');
+          if (isInputFocused) (activeEl as HTMLElement).blur();
+        } else if (refinementFilters.length > 0) {
+          // 如果没有正在输入，则撤销最近的一个面包屑
+          removeRefinementFilter(refinementFilters.length - 1);
+        }
+        return;
+      }
+
+      // B. 过滤掉非日志视图、已聚焦输入框或快捷键组合
+      if (activeView !== 'log' || isInputFocused || e.ctrlKey || e.metaKey || e.altKey) {
+        return;
+      }
+
+      // C. 字母数字直达：聚焦并带入字符
+      if (e.key.length === 1) {
+        filterInputRef.current?.focus();
+        setLocalSearch(prev => {
+          const newVal = prev + e.key;
+          setTransientRefinement(newVal);
+          return newVal;
+        });
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [activeView, localSearch, refinementFilters, setTransientRefinement, removeRefinementFilter]);
 
   // 辅助函数：计算时间差
   const calculateTimeDelta = (currentContent: string, previousContent: string) => {
@@ -317,6 +360,7 @@ export default function LogViewer() {
 
         <div className="flex items-center ml-4 relative min-w-[200px] flex-1 max-w-sm">
           <input
+            ref={filterInputRef}
             type="text"
             placeholder="实时过滤并回车固化..."
             value={localSearch}
