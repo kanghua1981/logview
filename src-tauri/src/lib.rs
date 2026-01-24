@@ -166,7 +166,7 @@ async fn parse_log_file(
     let level_re = if !level_regex.is_empty() {
         Regex::new(&level_regex).ok()
     } else {
-        Regex::new(r"(?i)\b(DEBUG|INFO|WARN|ERROR|FATAL)\b").ok()
+        Regex::new(r"(?i)\[(DEBUG|INFO|WARN|ERROR|FATAL|NORM|TRACE|SUCCESS)\]").ok()
     };
 
     let boot_re = if !boot_regex.is_empty() {
@@ -426,6 +426,35 @@ async fn get_log_range(
     }
 }
 
+#[tauri::command]
+async fn get_log_lines_by_indices(
+    indices: Vec<usize>, // 0-based
+    state: State<'_, AppState>
+) -> Result<Vec<LogLine>, String> {
+    let index_opt = state.current_index.lock().unwrap().clone();
+    
+    if let Some(index) = index_opt {
+        let line_count = index.offsets.len();
+        let bytes = &index.mmap[..];
+        
+        let result: Vec<LogLine> = indices.into_par_iter().filter_map(|idx| {
+            if idx >= line_count { return None; }
+            let start = index.offsets[idx];
+            let end = if idx + 1 < line_count { index.offsets[idx+1] } else { bytes.len() };
+            let line_content = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
+            
+            Some(LogLine {
+                line_number: idx + 1,
+                content: line_content,
+                level: index.levels[idx].clone(),
+            })
+        }).collect();
+
+        Ok(result)
+    } else {
+        Err("No file opened".to_string())
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PatternStat {
@@ -985,6 +1014,115 @@ async fn analyze_recurrent_intervals(
     Ok(segments)
 }
 
+#[tauri::command]
+async fn get_filtered_indices(
+    log_levels: Vec<String>,
+    line_ranges: Option<Vec<(usize, usize)>>,
+    highlights: Vec<String>,
+    context_lines: usize,
+    sub_search: Option<String>,
+    state: State<'_, AppState>
+) -> Result<Vec<usize>, String> {
+    let index = state.current_index.lock().unwrap().clone()
+        .ok_or("No file opened")?;
+    
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+    let line_count = offsets.len();
+
+    let levels_set: std::collections::HashSet<String> = log_levels.iter()
+        .map(|s| s.to_uppercase()).collect();
+    
+    let keywords: Vec<String> = highlights.iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let sub_search_lower = sub_search.map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty());
+
+    let matches: Vec<bool> = (0..line_count).into_par_iter().map(|idx| {
+        if let Some(ref ranges) = line_ranges {
+            let ln = idx + 1;
+            if !ranges.iter().any(|(s, e)| ln >= *s && ln <= *e) { return false; }
+        }
+        if !levels_set.is_empty() {
+            // 将未识别级别的行默认映射为 INFO
+            let cur_lv = index.levels[idx].as_ref().map(|s| s.to_uppercase()).unwrap_or_else(|| "INFO".to_string());
+            if !levels_set.contains(&cur_lv) { return false; }
+        }
+
+        // 基础过滤（脱水/踪迹模式产生的关键字）
+        let mut base_match = keywords.is_empty();
+        if !base_match {
+            let start = offsets[idx];
+            let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+            let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
+            base_match = keywords.iter().any(|k| line_str.contains(k));
+        }
+
+        if !base_match { return false; }
+
+        // 第三级：即时搜索过滤
+        if let Some(ref sub_k) = sub_search_lower {
+            let start = offsets[idx];
+            let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+            let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding).to_lowercase();
+            if !line_str.contains(sub_k) { return false; }
+        }
+
+        true
+    }).collect();
+
+    let mut result = Vec::new();
+    if !keywords.is_empty() && context_lines > 0 {
+        let mut mask = vec![false; line_count];
+        for i in 0..line_count {
+            if matches[i] {
+                let start = i.saturating_sub(context_lines);
+                let end = (i + context_lines).min(line_count - 1);
+                for j in start..=end { mask[j] = true; }
+            }
+        }
+        for i in 0..line_count { if mask[i] { result.push(i); } }
+    } else {
+        for i in 0..line_count { if matches[i] { result.push(i); } }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn save_filtered_logs(
+    path: String,
+    indices: Vec<usize>,
+    state: State<'_, AppState>
+) -> Result<(), String> {
+    use std::fs::File;
+    use std::io::{Write, BufWriter};
+
+    let index = state.current_index.lock().unwrap().clone()
+        .ok_or("No file opened")?;
+    
+    let bytes = &index.mmap[..];
+    let offsets = &index.offsets;
+    let line_count = offsets.len();
+
+    let file = File::create(path).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(file);
+
+    for idx in indices {
+        if idx >= line_count { continue; }
+        let start = offsets[idx];
+        let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
+        let line_str = bytes_to_string_with_encoding(&bytes[start..end], index.encoding);
+        
+        // 写入 1-based 行号前缀
+        writeln!(writer, "{}: {}", idx + 1, line_str.trim_end()).map_err(|e| e.to_string())?;
+    }
+
+    writer.flush().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1013,13 +1151,16 @@ pub fn run() {
             parse_log_content,
             parse_log_with_custom_splitters,
             get_log_range,
+            get_log_lines_by_indices,
             search_log,
+            get_filtered_indices,
             analyze_log_patterns,
             extract_metrics,
             analyze_time_gaps,
             analyze_workflow_duration,
             analyze_recurrent_intervals,
             save_sessions,
+            save_filtered_logs,
             write_config_file,
             read_config_file
         ])

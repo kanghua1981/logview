@@ -15,13 +15,40 @@ export default function LogViewer() {
   const showOnlyHighlights = useLogStore((state) => state.showOnlyHighlights);
   const timestampRegex = useLogStore((state) => state.timestampRegex);
   const highlightedLine = useLogStore((state) => state.flashLine); 
-  
+  const subSearchTerm = useLogStore((state) => state.subSearchTerm);
+  const setSubSearchTerm = useLogStore((state) => state.setSubSearchTerm);
+  const currentFileId = useLogStore((state) => state.currentFileId);
+  const files = useLogStore((state) => state.files);
+  const currentSessionIds = useLogStore((state) => state.selectedSessionIds);
+  const currentFile = files.find(f => f.id === currentFileId);
+
+  // 本地搜索项（用于防抖）
+  const [localSearch, setLocalSearch] = useState(subSearchTerm);
+
+  // 三级过滤器逻辑：现在已经移至后端处理
+  const displayIndices = filteredIndices;
+
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [isDragging, setIsDragging] = useState(false);
   const lastUpdateRef = useRef(0);
   const isProgrammaticScroll = useRef(false);
   const fetchTimeoutRef = useRef<any>(null);
   const rangeRef = useRef<{ startIndex: number; endIndex: number } | null>(null);
+
+  // 同步本地搜索项到全局 store（防抖）
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (localSearch !== subSearchTerm) {
+        setSubSearchTerm(localSearch);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [localSearch]);
+
+  // 当全局 store 的 subSearchTerm 被外部清空时，同步本地状态
+  useEffect(() => {
+    setLocalSearch(subSearchTerm);
+  }, [subSearchTerm]);
 
   // 辅助函数：计算时间差
   const calculateTimeDelta = (currentContent: string, previousContent: string) => {
@@ -100,9 +127,9 @@ export default function LogViewer() {
 
   // 监听跳转请求
   useEffect(() => {
-    if (scrollTargetLine !== null && filteredIndices.length > 0) {
+    if (scrollTargetLine !== null && displayIndices.length > 0) {
       // 找到行号对应的列表索引
-      const index = filteredIndices.findIndex(lineIdx => (lineIdx + 1) === scrollTargetLine);
+      const index = displayIndices.findIndex(lineIdx => (lineIdx + 1) === scrollTargetLine);
       if (index !== -1) {
         isProgrammaticScroll.current = true;
         virtuosoRef.current?.scrollToIndex({
@@ -116,33 +143,43 @@ export default function LogViewer() {
         }, 100);
       }
     }
-  }, [scrollTargetLine, filteredIndices.length]);
+  }, [scrollTargetLine, displayIndices]); // 使用 displayIndices 引用作为依赖
 
-  // 高性能延迟加载逻辑
+  // 当过滤索引改变（如切换 contextLines 或关键字）时，立即触发当前视图内容的抓取
+  useEffect(() => {
+    if (rangeRef.current && displayIndices.length > 0) {
+      fetchLinesData(rangeRef.current.startIndex, rangeRef.current.endIndex);
+    }
+  }, [displayIndices]);
+
+  // 高性能延迟加载逻辑优化：基于索引批量获取
+  // 解决了离散行号下 IPC 通信过多或范围过大的平衡问题
   const fetchLinesData = async (startIndex: number, endIndex: number) => {
-    if (filteredIndices.length === 0) return;
+    if (displayIndices.length === 0) return;
     
-    // 检查这个范围内是否已经有内容
-    const slice = filteredIndices.slice(startIndex, endIndex + 1);
-    const needsFetch = slice.some(idx => !lineContents.has(idx + 1));
-    if (!needsFetch) return;
-
-    // 向前向后多预加载一些
-    const startLine = filteredIndices[Math.max(0, startIndex - 50)] + 1;
-    const endLine = filteredIndices[Math.min(filteredIndices.length - 1, endIndex + 50)] + 1;
+    // 扩大加载范围：向前后各多加载200行，提升滚动流畅度
+    const bufferSize = 200;
+    const expandedStart = Math.max(0, startIndex - bufferSize);
+    const expandedEnd = Math.min(displayIndices.length - 1, endIndex + bufferSize);
+    
+    const requestedIndices = displayIndices.slice(expandedStart, expandedEnd + 1);
+    const missingIndices = requestedIndices.filter(idx => !lineContents.has(idx + 1));
+    
+    if (missingIndices.length === 0) return;
 
     try {
+      // 核心优化：直接传递离散索引列表给后端
       const result = await invoke<Array<{
         line_number: number;
         content: string;
         level?: string;
-      }>>('get_log_range', { 
-        startLine,
-        endLine
+      }>>('get_log_lines_by_indices', { 
+        indices: missingIndices 
       });
 
+      console.log(`Fetched ${result?.length || 0} discrete lines.`);
+
       if (result && result.length > 0) {
-        // 修复字段映射：将 line_number 转换为 lineNumber 以匹配 store 中的期望格式
         useLogStore.getState().updateLogLinesContent(result.map(l => ({
           lineNumber: l.line_number,
           content: l.content,
@@ -150,7 +187,38 @@ export default function LogViewer() {
         })));
       }
     } catch (error) {
-      console.error('Lazy fetch failed:', error);
+      console.error('Discrete fetch failed, falling back to chunked range:', error);
+      
+      // 备选方案：如果索引获取失败，回退到范围抓取（带 Chunking 优化）
+      let currentChunk = [missingIndices[0]];
+      const chunks = [];
+      for (let i = 1; i < missingIndices.length; i++) {
+        if (missingIndices[i] - missingIndices[i-1] < 10) {
+          currentChunk.push(missingIndices[i]);
+        } else {
+          chunks.push(currentChunk);
+          currentChunk = [missingIndices[i]];
+        }
+      }
+      chunks.push(currentChunk);
+
+      for (const chunk of chunks) {
+        const startLine = chunk[0] + 1;
+        const endLine = chunk[chunk.length - 1] + 1;
+        try {
+          const res = await invoke<any[]>('get_log_range', { 
+            start_line: startLine, 
+            end_line: endLine 
+          });
+          useLogStore.getState().updateLogLinesContent(res.map(l => ({
+            lineNumber: l.line_number,
+            content: l.content,
+            level: l.level
+          })));
+        } catch (e) {
+          console.error('Fallback fetch failed:', e);
+        }
+      }
     }
   };
 
@@ -158,10 +226,10 @@ export default function LogViewer() {
     rangeRef.current = range;
 
     // 1. 更新当前可见行（用于同步其他面板）
-    if (filteredIndices.length > 0) {
+    if (displayIndices.length > 0) {
       const midIndex = Math.floor((range.startIndex + range.endIndex) / 2);
-      const safeIndex = Math.min(Math.max(0, midIndex), filteredIndices.length - 1);
-      const lineIdx = filteredIndices[safeIndex];
+      const safeIndex = Math.min(Math.max(0, midIndex), displayIndices.length - 1);
+      const lineIdx = displayIndices[safeIndex];
       if (lineIdx !== undefined) {
         const now = Date.now();
         if (now - lastUpdateRef.current > 100) {
@@ -175,7 +243,7 @@ export default function LogViewer() {
     if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
     fetchTimeoutRef.current = setTimeout(() => {
       fetchLinesData(range.startIndex, range.endIndex);
-    }, 100); // 100ms 停顿后开始加载
+    }, 50); // 50ms 停顿后开始加载，减少等待时间
   };
 
   const getLevelBadgeColor = (level: string): string => {
@@ -205,7 +273,69 @@ export default function LogViewer() {
           </div>
         </div>
       )}
-      {filteredIndices.length === 0 ? (
+
+      {/* 多级过滤器面包屑 */}
+      <div className="bg-gray-900 border-b border-gray-800 px-4 py-1.5 flex items-center justify-between text-xs overflow-x-auto no-scrollbar">
+        <div className="flex items-center space-x-2 shrink-0">
+          <span className="text-gray-500 font-medium">当前范围：</span>
+          
+          {/* 一级：文件 */}
+          {currentFile && (
+            <div className="flex items-center bg-gray-800 text-gray-300 px-2 py-0.5 rounded border border-gray-700">
+               <span className="opacity-60 mr-1 text-[10px]">📁</span>
+               {currentFile.name}
+            </div>
+          )}
+
+          <span className="text-gray-700">/</span>
+
+          {/* 二级：Session */}
+          {currentSessionIds.length > 0 && (
+            <div className="flex items-center bg-blue-900/30 text-blue-300 px-2 py-0.5 rounded border border-blue-800/50">
+               <span className="opacity-60 mr-1 text-[10px]">🔄 Session</span>
+               {currentSessionIds.length === 1 ? `#${currentSessionIds[0]}` : `${currentSessionIds.length} 个`}
+            </div>
+          )}
+
+          {currentSessionIds.length > 0 && <span className="text-gray-700">/</span>}
+
+          {/* 三级：踪迹/模式 (如果有的话) */}
+          {showOnlyHighlights && (
+            <div className="flex items-center bg-emerald-900/30 text-emerald-300 px-2 py-0.5 rounded border border-emerald-800/50">
+               <span className="opacity-60 mr-1 text-[10px]">🎯</span>
+               踪迹模式
+            </div>
+          )}
+        </div>
+
+        {/* 三级/四级：即时搜索 */}
+        <div className="flex items-center ml-4 relative min-w-[200px] flex-1 max-w-md">
+          <input
+            type="text"
+            placeholder="在当前结果中搜索关键字..."
+            value={localSearch}
+            onChange={(e) => setLocalSearch(e.target.value)}
+            className="w-full bg-gray-800 border border-gray-700 rounded-full px-8 py-1 text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-500 placeholder-gray-600"
+          />
+          <span className="absolute left-3 top-1.5 text-gray-600">🔍</span>
+          {localSearch && (
+            <button 
+              onClick={() => setLocalSearch('')}
+              className="absolute right-3 top-1.5 text-gray-400 hover:text-white"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+
+        <div className="ml-4 shrink-0 text-gray-500 flex items-center space-x-3">
+           <span className="font-mono bg-gray-800 px-2 py-0.5 rounded text-[10px]">
+             {displayIndices.length} / {filteredIndices.length} 行
+           </span>
+        </div>
+      </div>
+
+      {displayIndices.length === 0 ? (
         <div className="h-full w-full flex items-center justify-center text-gray-500">
           <div className="text-center">
             <p className="text-xl mb-2">暂无日志</p>
@@ -217,15 +347,17 @@ export default function LogViewer() {
           <Virtuoso
             ref={virtuosoRef}
             style={{ height: '100%', width: '100%' }}
-            totalCount={filteredIndices.length}
+            totalCount={displayIndices.length}
+            overscan={300}
+            increaseViewportBy={{ top: 800, bottom: 800 }}
             rangeChanged={handleRangeChanged}
             itemContent={(index) => {
-              const lineIdx = filteredIndices[index];
+              const lineIdx = displayIndices[index];
               const lineNumber = lineIdx + 1;
               const level = lineLevels[lineIdx];
               const content = lineContents.get(lineNumber) || "";
 
-              const prevLineIdx = index > 0 ? filteredIndices[index - 1] : null;
+              const prevLineIdx = index > 0 ? displayIndices[index - 1] : null;
               const prevContent = prevLineIdx !== null ? lineContents.get(prevLineIdx + 1) : null;
               
               const timeDelta = (showOnlyHighlights && content && prevContent) 

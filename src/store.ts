@@ -118,6 +118,7 @@ interface LogViewState {
 
   // 字体大小
   fontSize: number;
+  subSearchTerm: string;
 
   // 新增指标追踪
   metrics: LogMetric[];
@@ -174,6 +175,7 @@ interface LogViewState {
   setSearchPanelOpen: (open: boolean) => void;
   setSearchOnlySelectedSessions: (only: boolean) => void;
   setSearchRegex: (isRegex: boolean) => void;
+  setSubSearchTerm: (term: string) => void;
   setFontSize: (size: number | ((prev: number) => number)) => void;
 
   // 新增指标 Actions
@@ -190,7 +192,7 @@ interface LogViewState {
   importHighlights: (json: string) => boolean;
 
   updateLogLinesContent: (updatedLines: LogLine[]) => void;
-  filterLogLines: () => void;
+  filterLogLines: () => Promise<void>;
 }
 
 export const useLogStore = create<LogViewState>((set, get) => ({
@@ -209,7 +211,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   bootMarkerRegex: '',
   logLevelRegex: '',
   timestampRegex: '\\[(.*?)\\]', // 修改：不再强制要求在行首，以兼容带串口前缀的日志
-  logLevelFilter: ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'],
+  logLevelFilter: ['DEBUG', 'INFO', 'NORM', 'WARN', 'ERROR', 'FATAL', 'TRACE', 'SUCCESS'],
   highlights: [],
   highlightContextLines: 0,
   showOnlyHighlights: false,
@@ -224,6 +226,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   searchOnlySelectedSessions: false,
   isSearchRegex: false,
   fontSize: Number(localStorage.getItem('font_size')) || 12,
+  subSearchTerm: '',
   analysisStats: [],
   analysisTimeGaps: [],
   analysisWorkflows: [],
@@ -390,6 +393,11 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setCurrentVisibleLine: (line) => set({ currentVisibleLine: line }),
   
   setSearchQuery: (query) => set({ searchQuery: query }),
+  setSubSearchTerm: (term) => {
+    set({ subSearchTerm: term });
+    // 当即时搜索项改变时，重新触发过滤
+    get().filterLogLines();
+  },
   setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
   setSearchOnlySelectedSessions: (only) => {
     set({ searchOnlySelectedSessions: only });
@@ -601,47 +609,61 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     await loadLogFile(currentFile.path);
   },
   
-  filterLogLines: () => {
-    const { lineCount, lineLevels, logLevelFilter, selectedSessionIds, sessions, highlights, showOnlyHighlights } = get();
+  filterLogLines: async () => {
+    const { 
+      lineCount, 
+      logLevelFilter, 
+      selectedSessionIds, 
+      sessions, 
+      highlights, 
+      showOnlyHighlights,
+      highlightContextLines
+    } = get();
     
     // 1. 基础范围：会话过滤
-    let indices: number[] = [];
-    if (selectedSessionIds.length > 0) {
-      const selectedRanges = selectedSessionIds.map(id => {
+    let lineRanges: [number, number][] | null = null;
+    if (selectedSessionIds && selectedSessionIds.length > 0) {
+      lineRanges = selectedSessionIds.map(id => {
         const s = sessions.find(sess => sess.id === id);
-        return s ? [s.startLine - 1, s.endLine - 1] : null;
-      }).filter(Boolean) as [number, number][];
-      
-      for (const [start, end] of selectedRanges) {
-        for (let i = start; i <= end; i++) {
-          indices.push(i);
-        }
+        return s ? [s.startLine, s.endLine] : null;
+      }).filter((r): r is [number, number] => r !== null);
+    }
+
+    try {
+      const activeHighlights = showOnlyHighlights 
+        ? highlights.filter(h => h.enabled).map(h => h.text)
+        : [];
+
+      // 核心调整：如果在脱水模式下没有有效的关键字，我们不应该显示全部，而是显示空或者警告
+      // 这里的逻辑维持现状（显示空），但要确保 activeHighlights 抓取到了内容
+      if (showOnlyHighlights && activeHighlights.length === 0) {
+        console.warn('Dehydration mode on but no active highlights found.');
+        set({ filteredIndices: [] });
+        return;
       }
-    } else {
-      indices = Array.from({ length: lineCount }, (_, i) => i);
-    }
 
-    // 2. 日志级别过滤
-    if (logLevelFilter.length > 0 && lineLevels.length > 0) {
-      indices = indices.filter(idx => {
-        const lv = lineLevels[idx];
-        if (!lv) return true;
-        const standardLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
-        if (standardLevels.includes(lv.toUpperCase())) {
-          return logLevelFilter.includes(lv.toUpperCase());
-        }
-        return true;
+      const indices = await invoke<number[]>('get_filtered_indices', {
+        logLevels: logLevelFilter,
+        lineRanges: lineRanges,
+        highlights: activeHighlights,
+        contextLines: showOnlyHighlights ? highlightContextLines : 0,
+        subSearch: get().subSearchTerm
       });
+      
+      set({ filteredIndices: indices });
+    } catch (err) {
+      console.error('Failed to filter logs:', err);
+      // 回退方案：至少显示会话范围内的日志
+      const simpleIndices = [];
+      if (lineRanges) {
+        for (const [start, end] of lineRanges) {
+          for (let i = start - 1; i < end; i++) simpleIndices.push(i);
+        }
+      } else {
+        for (let i = 0; i < lineCount; i++) simpleIndices.push(i);
+      }
+      set({ filteredIndices: simpleIndices });
     }
-
-    // 3. 高亮过滤 (暂不实现 ContextLines 逻辑以保持性能，后续按需添加)
-    if (showOnlyHighlights && highlights.some(h => h.enabled)) {
-      // 注意：由于我们不存储全文在内存，高亮过滤可能需要后端支持
-      // 这里暂时只做占位，或者提示用户该功能在大规模日志下受限
-      console.warn('High-scale highlight filtering is currently limited');
-    }
-    
-    set({ filteredIndices: indices });
   },
 }));
 

@@ -8,18 +8,11 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  BarChart,
-  Bar,
   Cell,
   ScatterChart,
   Scatter,
   ZAxis
 } from 'recharts';
-
-interface TimeGap {
-  line_number: number;
-  gap_ms: number;
-}
 
 interface WorkflowSegment {
   start_line: number;
@@ -30,32 +23,20 @@ interface WorkflowSegment {
   id: string | null;
 }
 
-interface PatternStat {
-  content: string;
-  count: number;
-  level: string | null;
-}
-
 export default function Dashboard() {
   const currentFileId = useLogStore((state) => state.currentFileId);
   const files = useLogStore((state) => state.files);
-  const addMetric = useLogStore((state) => state.addMetric);
   const currentFile = files.find(f => f.id === currentFileId);
   const timestampRegex = useLogStore((state) => state.timestampRegex);
   const { 
     setActiveView, 
     setScrollTargetLine, 
-    analysisStats: stats, 
-    analysisTimeGaps: timeGaps, 
     analysisWorkflows: workflows,
-    hasAnalyzedStats,
     highlights,
-    setAnalysisStatsResults,
     setAnalysisWorkflowResults
   } = useLogStore();
   
-  const [loading, setLoading] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+
 
   // 流程分析相关的本地状态
   const [startRegex, setStartRegex] = useState('');
@@ -75,49 +56,6 @@ export default function Dashboard() {
       count: durs.length
     };
   }, [workflows]);
-
-  const escapeRegex = (str: string) => {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  };
-
-  const convertPlaceholderToRegex = (pattern: string) => {
-    // 1. 先进行基础的正则转义
-    let escaped = escapeRegex(pattern);
-    
-    // 2. 将特殊占位符替换为正则语法
-    // 将 HH:MM:SS 替换为数字时间匹配
-    escaped = escaped.replace(/HH:MM:SS/g, '\\d{2}:\\d{2}:\\d{2}');
-    // 将 N 替换为数字匹配
-    escaped = escaped.replace(/N/g, '\\d+');
-    // 将 0xADDR 替换为十六进制地址匹配
-    escaped = escaped.replace(/0xADDR/g, '0x[0-9a-fA-F]+');
-    
-    return escaped;
-  };
-
-  const handleApplyPattern = (pattern: string) => {
-    setStartRegex(convertPlaceholderToRegex(pattern));
-  };
-
-  const loadStats = async () => {
-    if (!currentFile) return;
-    setLoading(true);
-    setErrorMsg(null);
-    try {
-      const [patterns, gaps] = await Promise.all([
-        invoke<PatternStat[]>('analyze_log_patterns'),
-        invoke<TimeGap[]>('analyze_time_gaps', { 
-          timestampRegex: timestampRegex 
-        })
-      ]);
-      setAnalysisStatsResults(patterns, gaps);
-    } catch (err) {
-      console.error('Failed to analyze:', err);
-      setErrorMsg('分析失败: ' + err);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleWorkflowAnalysis = async () => {
     if (!currentFile || !startRegex || (!isIntervalMode && !endRegex)) {
@@ -153,40 +91,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleQuickAddMetric = (pattern: string) => {
-    // 1. 先进行基础的正则转义
-    let escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    
-    // 2. 将特殊占位符替换为正则语法
-    // 将 HH:MM:SS 替换为数字时间匹配
-    escaped = escaped.replace(/HH:MM:SS/g, '\\d{2}:\\d{2}:\\d{2}');
-    // 将 0xADDR 替换为十六进制地址匹配
-    escaped = escaped.replace(/0xADDR/g, '0x[0-9a-fA-F]+');
-    
-    // 3. 处理数字占位符 N
-    // 我们假设模式中最后一个 N 是用户关心的数值指标，将其设为捕获组 (\d+)
-    // 其他前面的 N 设为普通的 \d+
-    let suggestedRegex = '';
-    const parts = escaped.split('N');
-    if (parts.length > 1) {
-      // 最后一个 N 之前的所有部分用 \d+ 连接
-      const lastPart = parts.pop();
-      suggestedRegex = parts.join('\\d+') + '(\\d+)' + lastPart;
-    } else {
-      suggestedRegex = escaped;
-    }
-      
-    const name = window.prompt('请输入指标名称:', '追踪指标');
-    if (name) {
-      addMetric(name, suggestedRegex);
-      alert(`已添加指标: ${name}，请前往“指标”页提取数据`);
-    }
-  };
-
-  const filteredStats = stats.filter(s => 
-    s.content.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
   if (!currentFile) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-gray-500">
@@ -202,21 +106,11 @@ export default function Dashboard() {
           <h2 className="text-2xl font-bold text-white mb-2">智能分析报告</h2>
           <p className="text-sm text-gray-400">正在分析: {currentFile.name}</p>
         </div>
-        <div className="flex space-x-3">
-          {errorMsg && (
-            <div className="bg-red-900/30 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-xs max-w-sm flex items-center">
-              ⚠️ {errorMsg}
-            </div>
-          )}
-          {!hasAnalyzedStats && !loading && (
-            <button
-              onClick={loadStats}
-              className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold shadow-lg shadow-blue-900/20 transition-all flex items-center space-x-2"
-            >
-              <span>🚀 启动全量模式分析</span>
-            </button>
-          )}
-        </div>
+        {errorMsg && (
+          <div className="bg-red-900/30 border border-red-800 text-red-200 px-4 py-2 rounded-lg text-xs max-w-sm flex items-center">
+            ⚠️ {errorMsg}
+          </div>
+        )}
       </header>
 
       {/* 概览卡片只在有文件时显示 */}
@@ -235,55 +129,6 @@ export default function Dashboard() {
           <p className="text-2xl font-mono text-purple-400">{(currentFile.size / 1024).toFixed(2)} KB</p>
         </div>
       </div>
-
-      {hasAnalyzedStats && timeGaps.length > 0 && (
-        <section className="bg-gray-800/30 p-4 rounded-xl border border-gray-700">
-          <div className="flex justify-between items-center mb-4">
-            <h3 className="text-lg font-semibold text-white flex items-center">
-              时间空隙分析 (卡顿检测)
-              <span className="ml-2 text-xs font-normal text-gray-500">发现超过 10ms 的日志间隔</span>
-            </h3>
-            <span className="text-xs text-blue-400">双击柱状图跳转对应日志</span>
-          </div>
-          <div className="h-48 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart 
-                data={timeGaps}
-                onDoubleClick={(state) => {
-                  if (state && state.activeLabel) {
-                    setScrollTargetLine(Number(state.activeLabel));
-                    setActiveView('log');
-                  }
-                }}
-                style={{ cursor: 'pointer' }}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" vertical={false} />
-                <XAxis dataKey="line_number" hide />
-                <YAxis 
-                  stroke="#9ca3af" 
-                  fontSize={10} 
-                  label={{ value: 'ms', angle: -90, position: 'insideLeft', fill: '#6b7280' }}
-                />
-                <Tooltip
-                  contentStyle={{ backgroundColor: '#1f2937', border: '1px solid #374151', borderRadius: '0.5rem' }}
-                  itemStyle={{ fontSize: '12px', color: '#f87171' }}
-                  labelStyle={{ color: '#9ca3af' }}
-                  labelFormatter={(value) => `行号: ${value}`}
-                  formatter={(value) => [`${value} ms`, '时间空隙']}
-                />
-                <Bar dataKey="gap_ms" radius={[2, 2, 0, 0]}>
-                  {timeGaps.map((entry, index) => (
-                    <Cell 
-                      key={`cell-${index}`} 
-                      fill={entry.gap_ms > 100 ? '#ef4444' : entry.gap_ms > 20 ? '#f59e0b' : '#3b82f6'} 
-                    />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </section>
-      )}
 
       <section className="bg-gray-800/60 p-5 rounded-xl border border-gray-700 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between space-y-2 md:space-y-0">
@@ -530,92 +375,6 @@ export default function Dashboard() {
           </div>
         )}
       </section>
-
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 space-y-4">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-500"></div>
-          <p className="text-gray-400 animate-pulse">正在扫描全量文件提取指纹模式...</p>
-        </div>
-      ) : hasAnalyzedStats ? (
-        <section className="space-y-4">
-          <div className="flex justify-between items-center">
-            <h3 className="text-lg font-semibold text-white flex items-center">
-              高频日志模式
-              <span className="ml-2 text-xs font-normal text-gray-500">(已合并相似行并屏蔽变量)</span>
-            </h3>
-            <div className="flex space-x-2">
-              <input 
-                type="text"
-                placeholder="搜索模式..."
-                className="bg-gray-800 border border-gray-700 rounded px-3 py-1 text-xs focus:ring-1 focus:ring-blue-500 outline-none w-48"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="space-y-3">
-            {filteredStats.slice(0, 50).map((stat, idx) => (
-              <div key={idx} className="group bg-gray-800/40 p-3 rounded-lg border border-gray-700/50 hover:border-gray-500 transition-all relative">
-                <div className="flex justify-between items-start mb-2">
-                  <div className="flex items-center space-x-2">
-                    <span className="text-xs font-bold px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 border border-blue-800/30">
-                      {stat.count} 次
-                    </span>
-                    {stat.level && (
-                      <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${getLevelBg(stat.level)}`}>
-                        {stat.level}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <span className="text-xs text-gray-500 font-mono">
-                      {((stat.count / currentFile.lines) * 100).toFixed(1)}%
-                    </span>
-                    <button
-                      onClick={() => handleApplyPattern(stat.content)}
-                      className="opacity-0 group-hover:opacity-100 bg-emerald-600 hover:bg-emerald-500 text-white text-[10px] px-2 py-0.5 rounded transition-all mr-2"
-                      title="将此关键字应用到下方的流程分析中"
-                    >
-                      🎯 分析此流程
-                    </button>
-                    <button
-                      onClick={() => handleQuickAddMetric(stat.content)}
-                      className="opacity-0 group-hover:opacity-100 bg-blue-600 hover:bg-blue-500 text-white text-[10px] px-2 py-0.5 rounded transition-all"
-                      title="将此模式中的数值添加到指标页追踪"
-                    >
-                      📈 追踪此指标
-                    </button>
-                  </div>
-                </div>
-                <p className="text-sm font-mono text-gray-300 break-all leading-relaxed pr-24">
-                  {stat.content}
-                </p>
-              </div>
-            ))}
-            {filteredStats.length === 0 && (
-              <div className="text-center py-10 text-gray-500 border-2 border-dashed border-gray-800 rounded-xl">
-                未匹配到相关模式
-              </div>
-            )}
-          </div>
-        </section>
-      ) : (
-        <div className="flex flex-col items-center justify-center py-20 text-gray-500 border-2 border-dashed border-gray-800 rounded-2xl bg-gray-800/20">
-          <span className="text-5xl mb-4">🔍</span>
-          <p className="text-lg font-medium">点击“启动深度分析”开始扫描模式</p>
-          <p className="text-sm mt-2 max-w-md text-center">系统将分析文件中的高频日志指纹，并尝试识别可追踪的数值指标。</p>
-        </div>
-      )}
     </div>
   );
-}
-
-function getLevelBg(level: string): string {
-  switch (level.toUpperCase()) {
-    case 'ERROR': return 'bg-red-900/50 text-red-400 border border-red-800/50';
-    case 'WARN': return 'bg-yellow-900/50 text-yellow-400 border border-yellow-800/50';
-    case 'FATAL': return 'bg-purple-900/50 text-purple-400 border border-purple-800/50';
-    default: return 'bg-blue-900/40 text-blue-400 border border-blue-800/50';
-  }
 }

@@ -16,8 +16,11 @@ export default function KeyPathTracker() {
     setHighlightContextLines,
     setScrollTargetLine,
     exportHighlights,
-    importHighlights
+    importHighlights,
+    filteredIndices
   } = useLogStore();
+
+  const [exporting, setExporting] = useState(false);
 
   const [input, setInput] = useState('');
 
@@ -106,7 +109,30 @@ export default function KeyPathTracker() {
       console.error(e);
     }
   };
+  const handleExportResult = async () => {
+    if (filteredIndices.length === 0) return;
+    
+    try {
+      setExporting(true);
+      const path = await save({
+        filters: [{ name: 'Log File', extensions: ['log', 'txt'] }],
+        defaultPath: `trace_result_${new Date().getTime()}.log`
+      });
 
+      if (path) {
+        await invoke('save_filtered_logs', { 
+          path, 
+          indices: filteredIndices 
+        });
+        alert('导出成功！');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('导出失败: ' + e);
+    } finally {
+      setExporting(false);
+    }
+  };
   return (
     <div className="p-4 space-y-4 select-none">
       <div className="flex flex-col space-y-3">
@@ -114,39 +140,59 @@ export default function KeyPathTracker() {
           <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider">关键路径跟踪</h3>
           <div className="flex items-center space-x-1">
             <button 
+              onClick={handleExportResult}
+              disabled={exporting || filteredIndices.length === 0}
+              title="导出当前过滤后的追踪结果日志"
+              className={`px-3 py-1.5 text-xs rounded border transition-colors flex items-center space-x-2 ${
+                exporting || filteredIndices.length === 0
+                ? 'bg-gray-800 text-gray-600 border-gray-800 cursor-not-allowed'
+                : 'bg-emerald-900/30 text-emerald-400 border-emerald-800/50 hover:bg-emerald-800/50'
+              }`}
+            >
+              <svg className={`w-3.5 h-3.5 ${exporting ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                {exporting ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                ) : (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                )}
+              </svg>
+              <span>{exporting ? '导出中...' : '导出结果'}</span>
+            </button>
+            <div className="w-[1px] h-4 bg-gray-700 mx-1"></div>
+            <button 
               onClick={handleExport}
               title="导出追踪方案"
-              className="px-2 py-1 text-[10px] bg-gray-800 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded border border-gray-700 transition-colors"
+              className="px-3 py-1.5 text-xs bg-gray-800 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded border border-gray-700 transition-colors"
             >
-              导出
+              配置导出
             </button>
             <button 
               onClick={handleImport}
               title="导入追踪方案"
-              className="px-2 py-1 text-[10px] bg-gray-800 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded border border-gray-700 transition-colors"
+              className="px-3 py-1.5 text-xs bg-gray-800 text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded border border-gray-700 transition-colors"
             >
-              导入
+              方案恢复
             </button>
           </div>
         </div>
 
-        <div className="flex items-center justify-between bg-gray-800/30 p-2 rounded-lg border border-gray-700/30">
-          <div className="flex items-center space-x-3">
-            <label className="flex items-center space-x-2 cursor-pointer group">
-              <span className="text-[11px] text-gray-500 group-hover:text-gray-400 transition-colors">上下文轮廓</span>
+        <div className="flex items-center justify-between bg-gray-800/30 p-3 rounded-lg border border-gray-700/30">
+          <div className="flex items-center space-x-4">
+            <label className="flex items-center space-x-3 cursor-pointer group">
+              <span className="text-xs text-gray-500 group-hover:text-gray-400 transition-colors">上下文轮廓</span>
               <input
                 type="number"
                 min="0"
-                max="50"
+                max="100"
                 value={highlightContextLines}
                 onChange={(e) => setHighlightContextLines(parseInt(e.target.value) || 0)}
-                className="w-10 px-1 py-0.5 bg-gray-900 text-blue-400 rounded border border-gray-700 focus:border-blue-500 focus:outline-none text-[10px] text-center font-bold"
+                className="w-14 px-2 py-1.5 bg-gray-900 text-blue-400 rounded-md border border-gray-700 focus:border-blue-500 focus:outline-none text-xs text-center font-bold"
               />
             </label>
           </div>
           
-          <label className="flex items-center space-x-2 cursor-pointer group">
-            <span className="text-[11px] text-gray-500 group-hover:text-gray-400 transition-colors">脱水模式</span>
+          <label className="flex items-center space-x-3 cursor-pointer group">
+            <span className="text-xs text-gray-500 group-hover:text-gray-400 transition-colors">脱水模式</span>
             <div className="relative inline-flex items-center">
               <input
                 type="checkbox"
@@ -154,7 +200,7 @@ export default function KeyPathTracker() {
                 onChange={(e) => setShowOnlyHighlights(e.target.checked)}
                 className="sr-only peer"
               />
-              <div className="w-7 h-4 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-blue-600"></div>
+              <div className="w-10 h-5 bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-5 rtl:peer-checked:after:-translate-x-5 peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-blue-600"></div>
             </div>
           </label>
         </div>
