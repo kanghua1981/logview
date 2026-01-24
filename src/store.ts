@@ -133,6 +133,14 @@ interface LogViewState {
   hasAnalyzedStats: boolean;
   hasAnalyzedWorkflows: boolean;
 
+  // AI 相关
+  aiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }>;
+  isAiLoading: boolean;
+  isAiPanelOpen: boolean;
+  aiEndpoint: string;
+  aiModel: string;
+  aiApiKey: string;
+
   // Actions
   addFile: (file: LogFile) => void;
   removeFile: (id: string) => void;
@@ -184,6 +192,14 @@ interface LogViewState {
   setRefinementFilters: (filters: string[]) => void;
   setTransientRefinement: (term: string) => void;
   setFontSize: (size: number | ((prev: number) => number)) => void;
+
+  // AI Actions
+  setAiMessages: (messages: Array<{ role: 'user' | 'assistant' | 'system', content: string }>) => void;
+  addAiMessage: (message: { role: 'user' | 'assistant' | 'system', content: string }) => void;
+  setAiLoading: (loading: boolean) => void;
+  setAiPanelOpen: (open: boolean) => void;
+  clearAiMessages: () => void;
+  setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string }) => void;
 
   // 新增指标 Actions
   addMetric: (name: string, regex: string) => void;
@@ -241,6 +257,12 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   analysisWorkflows: [],
   hasAnalyzedStats: false,
   hasAnalyzedWorkflows: false,
+  aiMessages: [],
+  isAiLoading: false,
+  isAiPanelOpen: false,
+  aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.deepseek.com',
+  aiModel: localStorage.getItem('ai_model') || 'deepseek-chat',
+  aiApiKey: localStorage.getItem('ai_api_key') || '',
   
   // ... 其他 Actions 保持不变
   addFile: (file) => set((state) => {
@@ -449,6 +471,23 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     set({ transientRefinement: term });
     get().filterLogLines();
   },
+
+  setAiMessages: (messages) => set({ aiMessages: messages }),
+  addAiMessage: (message) => set((state) => ({ aiMessages: [...state.aiMessages, message] })),
+  setAiLoading: (loading) => set({ isAiLoading: loading }),
+  setAiPanelOpen: (open) => set({ isAiPanelOpen: open }),
+  clearAiMessages: () => set({ aiMessages: [] }),
+  setAiConfig: (config) => set((state) => {
+    if (config.endpoint !== undefined) localStorage.setItem('ai_endpoint', config.endpoint);
+    if (config.model !== undefined) localStorage.setItem('ai_model', config.model);
+    if (config.apiKey !== undefined) localStorage.setItem('ai_api_key', config.apiKey);
+    return {
+      aiEndpoint: config.endpoint ?? state.aiEndpoint,
+      aiModel: config.model ?? state.aiModel,
+      aiApiKey: config.apiKey ?? state.aiApiKey,
+    };
+  }),
+  
   setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
   setSearchOnlySelectedSessions: (only) => {
     set({ searchOnlySelectedSessions: only });

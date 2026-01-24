@@ -194,13 +194,7 @@ async fn parse_log_file(
     }).collect();
 
     // 3. 计算会话数
-    let boot_re = if !boot_regex.is_empty() {
-        Regex::new(&boot_regex).ok()
-    } else {
-        Regex::new(r"(?i)(system|boot|start)(ed|ing|up)").ok()
-    };
-
-    let sessions_count = if let Some(re) = boot_re {
+    let sessions_count = if let Some(ref re) = boot_re {
         (0..line_count).into_par_iter().filter(|&idx| {
             let start = offsets[idx];
             let end = if idx + 1 < line_count { offsets[idx+1] } else { bytes.len() };
@@ -1281,6 +1275,63 @@ async fn find_first_occurrence(
     Ok(first_match)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ChatRequest {
+    model: String,
+    messages: Vec<ChatMessage>,
+    stream: bool,
+}
+
+#[tauri::command]
+async fn call_openai_api(
+    base_url: String,
+    api_key: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let request = ChatRequest {
+        model,
+        messages,
+        stream: false,
+    };
+
+    let url = if base_url.ends_with("/chat/completions") {
+        base_url
+    } else {
+        format!("{}/chat/completions", base_url.trim_end_matches('/'))
+    };
+
+    let response = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let err_text = response.text().await.unwrap_or_default();
+        return Err(format!("AI Error ({}): {}", status, err_text));
+    }
+
+    let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    
+    let content = result["choices"][0]["message"]["content"]
+        .as_str()
+        .ok_or("Failed to extract content from AI response")?
+        .to_string();
+
+    Ok(content)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1321,7 +1372,8 @@ pub fn run() {
             save_filtered_logs,
             write_config_file,
             read_config_file,
-            find_first_occurrence
+            find_first_occurrence,
+            call_openai_api
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -25,7 +25,11 @@ export default function ConfigPanel() {
     deleteProfile,
     setActiveProfile,
     exportConfig,
-    importConfig
+    importConfig,
+    aiEndpoint,
+    aiModel,
+    aiApiKey,
+    setAiConfig
   } = useLogStore();
 
   const [bootInput, setBootInput] = useState(bootMarkerRegex);
@@ -34,6 +38,11 @@ export default function ConfigPanel() {
   const [timeGapInput, setTimeGapInput] = useState(timeGapThreshold);
   const [profileName, setProfileName] = useState('');
 
+  // AI 配置本地状态
+  const [endpointInput, setEndpointInput] = useState(aiEndpoint);
+  const [modelInput, setModelInput] = useState(aiModel);
+  const [apiKeyInput, setApiKeyInput] = useState(aiApiKey);
+
   const currentFile = files.find(f => f.id === currentFileId);
 
   useEffect(() => {
@@ -41,11 +50,14 @@ export default function ConfigPanel() {
     setLevelInput(logLevelRegex);
     setTimestampInput(timestampRegex);
     setTimeGapInput(timeGapThreshold);
+    setEndpointInput(aiEndpoint);
+    setModelInput(aiModel);
+    setApiKeyInput(aiApiKey);
     const activeProfile = profiles.find(p => p.id === activeProfileId);
     if (activeProfile) {
       setProfileName(activeProfile.name);
     }
-  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles]);
+  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles, aiEndpoint, aiModel, aiApiKey]);
 
   const logLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
 
@@ -262,6 +274,68 @@ export default function ConfigPanel() {
       >
         应用并重新解析
       </button>
+
+      <hr className="border-gray-700" />
+
+      {/* AI 助手配置 */}
+      <div className="bg-purple-900/10 border border-purple-800/30 p-4 rounded-lg space-y-4">
+        <h3 className="text-sm font-semibold text-purple-300 flex items-center">
+          <span className="mr-2">🤖</span> AI 智能诊断配置
+        </h3>
+        <p className="text-[10px] text-purple-400/80">
+          支持 OpenAI 兼容接口。输入 ? 即可在命令栏发起询问。
+        </p>
+        
+        <div className="space-y-3">
+          <div>
+            <label className="text-[10px] text-gray-500 block mb-1 uppercase">API Endpoint / Base URL</label>
+            <input
+              type="text"
+              value={endpointInput}
+              onChange={(e) => setEndpointInput(e.target.value)}
+              placeholder="https://api.openai.com/v1"
+              className="w-full px-2 py-1.5 bg-gray-900 text-purple-200 rounded border border-purple-900/50 focus:border-purple-500 focus:outline-none text-[11px] font-mono"
+            />
+          </div>
+          
+          <div className="flex space-x-2">
+            <div className="flex-1">
+              <label className="text-[10px] text-gray-500 block mb-1 uppercase">Model</label>
+              <input
+                type="text"
+                value={modelInput}
+                onChange={(e) => setModelInput(e.target.value)}
+                placeholder="gpt-4o / deepseek-chat"
+                className="w-full px-2 py-1.5 bg-gray-900 text-purple-200 rounded border border-purple-900/50 focus:border-purple-500 focus:outline-none text-[11px] font-mono"
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-[10px] text-gray-500 block mb-1 uppercase">API Key</label>
+              <input
+                type="password"
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                placeholder="sk-..."
+                className="w-full px-2 py-1.5 bg-gray-900 text-purple-200 rounded border border-purple-900/50 focus:border-purple-500 focus:outline-none text-[11px] font-mono"
+              />
+            </div>
+          </div>
+          
+          <button
+            onClick={() => {
+              setAiConfig({
+                endpoint: endpointInput,
+                model: modelInput,
+                apiKey: apiKeyInput
+              });
+              alert('AI 配置已保存');
+            }}
+            className="w-full py-1.5 bg-purple-600/50 hover:bg-purple-600 text-white rounded text-xs font-medium transition-all border border-purple-500/30"
+          >
+            保存 AI 设置
+          </button>
+        </div>
+      </div>
 
       <hr className="border-gray-700" />
 

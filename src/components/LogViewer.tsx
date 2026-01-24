@@ -5,6 +5,7 @@ import { loadLogFile } from '../utils/logLoader';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { processCommand } from '../utils/commandProcessor';
+import AiSidePanel from './AiSidePanel';
 
 export default function LogViewer() {
   const filteredIndices = useLogStore((state) => state.filteredIndices);
@@ -135,9 +136,9 @@ export default function LogViewer() {
         setLocalSearch(prev => {
           const newVal = prev + e.key;
           const prefix = getActiveModeInfo().prefix;
-          // 命令和时间模式下不触发实时过滤，亦或用户正在手动输入这些前缀，避免输入过程中视图消失
-          if (refinementMode !== 'command' && refinementMode !== 'time' && 
-              !newVal.startsWith(':') && !newVal.startsWith('@')) {
+          // 命令、时间、AI 模式下不触发实时过滤，亦或用户正在手动输入这些前缀，避免输入过程中视图消失
+          if (refinementMode !== 'command' && refinementMode !== 'time' && refinementMode !== 'ai' && 
+              !newVal.startsWith(':') && !newVal.startsWith('@') && !newVal.startsWith('?')) {
             setTransientRefinement(prefix + newVal);
           }
           return newVal;
@@ -153,9 +154,9 @@ export default function LogViewer() {
   // 当 localSearch 或 mode 变化时同步到 store
   useEffect(() => {
     const trimmed = localSearch.trim();
-    // 命令和时间模式是“指令型”而非“搜索型”，亦或用户正在手动输入这些前缀，均不触发实时过滤
-    if (refinementMode === 'command' || refinementMode === 'time' || 
-        trimmed.startsWith(':') || trimmed.startsWith('@')) {
+    // 命令、时间、AI 模式是“指令型”而非“搜索型”，亦或用户正在手动输入这些前缀，均不触发实时过滤
+    if (refinementMode === 'command' || refinementMode === 'time' || refinementMode === 'ai' || 
+        trimmed.startsWith(':') || trimmed.startsWith('@') || trimmed.startsWith('?')) {
       setTransientRefinement('');
       return;
     }
@@ -373,12 +374,13 @@ export default function LogViewer() {
   };
 
   return (
-    <div 
-      className="flex-1 w-full h-full bg-gray-900 text-white overflow-hidden relative"
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-    >
+    <div className="flex h-full w-full overflow-hidden">
+      <div 
+        className="flex-1 h-full bg-gray-900 text-white overflow-hidden relative"
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
       {isDragging && (
         <div className="absolute inset-0 bg-blue-600/20 border-4 border-dashed border-blue-400 flex items-center justify-center z-50">
           <div className="text-center">
@@ -485,9 +487,12 @@ export default function LogViewer() {
                 } else if (trimmedInput.startsWith('=')) {
                   targetMode = 'exact';
                   finalInput = trimmedInput.substring(1);
+                } else if (trimmedInput.startsWith('?')) {
+                  targetMode = 'ai';
+                  finalInput = trimmedInput.substring(1);
                 }
 
-                if (targetMode === 'command' || targetMode === 'time') {
+                if (targetMode === 'command' || targetMode === 'time' || targetMode === 'ai') {
                   const result = await processCommand(finalInput, targetMode);
                   if (result.success) {
                     setLocalSearch('');
@@ -631,6 +636,8 @@ export default function LogViewer() {
           />
         </div>
       )}
+      </div>
+      <AiSidePanel />
     </div>
   );
 }
