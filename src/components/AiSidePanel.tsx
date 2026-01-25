@@ -1,16 +1,19 @@
 import ReactMarkdown from 'react-markdown';
 import { useLogStore } from '../store';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export default function AiSidePanel() {
   const isAiPanelOpen = useLogStore((state) => state.isAiPanelOpen);
   const setAiPanelOpen = useLogStore((state) => state.setAiPanelOpen);
+  const aiPanelWidth = useLogStore((state) => state.aiPanelWidth);
+  const setAiPanelWidth = useLogStore((state) => state.setAiPanelWidth);
   const aiMessages = useLogStore((state) => state.aiMessages);
   const isAiLoading = useLogStore((state) => state.isAiLoading);
   const clearAiMessages = useLogStore((state) => state.clearAiMessages);
   const addRefinementFilter = useLogStore((state) => state.addRefinementFilter);
   
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [isResizing, setIsResizing] = useState(false);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -18,6 +21,36 @@ export default function AiSidePanel() {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [aiMessages, isAiLoading]);
+
+  // Resize logic
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const newWidth = Math.max(300, Math.min(800, window.innerWidth - e.clientX));
+      setAiPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'col-resize';
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'default';
+    };
+  }, [isResizing, setAiPanelWidth]);
 
   const parseFilters = (content: string) => {
     const lines = content.split('\n');
@@ -39,7 +72,16 @@ export default function AiSidePanel() {
   if (!isAiPanelOpen) return null;
 
   return (
-    <div className="w-96 flex flex-col border-l border-gray-700 bg-gray-900 shadow-2xl z-40 transition-all">
+    <div 
+      className="relative flex flex-col border-l border-gray-700 bg-gray-900 shadow-2xl z-40 transition-all select-none"
+      style={{ width: `${aiPanelWidth}px` }}
+    >
+      {/* Resizer Handle (Left Side) */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-50 hover:bg-blue-500/50 transition-colors ${isResizing ? 'bg-blue-500 w-1' : ''}`}
+      />
+
       <div className="h-14 flex items-center justify-between px-4 border-b border-gray-700 bg-gray-800">
         <div className="flex items-center space-x-2">
           <span className="text-xl">✨</span>

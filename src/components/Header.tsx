@@ -12,6 +12,10 @@ export default function Header() {
   const selectedSessionIds = useLogStore((state) => state.selectedSessionIds);
   const isSearchRegex = useLogStore((state) => state.isSearchRegex);
   const setSearchRegex = useLogStore((state) => state.setSearchRegex);
+  const isSidebarOpen = useLogStore((state) => state.isSidebarOpen);
+  const setSidebarOpen = useLogStore((state) => state.setSidebarOpen);
+  const isAiPanelOpen = useLogStore((state) => state.isAiPanelOpen);
+  const setAiPanelOpen = useLogStore((state) => state.setAiPanelOpen);
   
   const currentFile = files.find(f => f.id === currentFileId);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -48,6 +52,24 @@ export default function Header() {
   return (
     <header className="h-14 bg-gray-800 text-white flex items-center justify-between px-4 border-b border-gray-700 relative z-50">
       <div className="flex items-center space-x-4">
+        <button
+          onClick={() => setSidebarOpen(!isSidebarOpen)}
+          title={isSidebarOpen ? "收起侧边栏 (Ctrl+B)" : "展开侧边栏 (Ctrl+B)"}
+          className={`p-1.5 rounded-md transition-colors ${isSidebarOpen ? 'text-blue-400 hover:bg-gray-700' : 'text-gray-400 hover:bg-gray-700'}`}
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h16" />
+          </svg>
+        </button>
+
+        <button
+          onClick={() => setAiPanelOpen(!isAiPanelOpen)}
+          title={isAiPanelOpen ? "关闭 AI 面板" : "打开 AI 面板 (或在过滤框输入 ?)"}
+          className={`p-1.5 rounded-md transition-colors ${isAiPanelOpen ? 'text-blue-400 bg-blue-500/10' : 'text-gray-400 hover:bg-gray-700'}`}
+        >
+          <span className="text-lg">✨</span>
+        </button>
+
         <div className="flex items-baseline space-x-2">
           <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-indigo-500 bg-clip-text text-transparent">LogView</h1>
           <span className="text-[10px] font-mono text-gray-500 px-1.5 py-0.5 bg-gray-900 border border-gray-700 rounded select-none">v1.2.0</span>

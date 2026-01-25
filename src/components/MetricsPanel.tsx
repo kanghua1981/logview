@@ -133,9 +133,10 @@ export default function MetricsPanel() {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {metrics.map(metric => {
             const needsFix = metric.regex.includes('N') || metric.regex.includes('HH:MM:SS');
+            const noCaptureGroup = !metric.regex.includes('(') || !metric.regex.includes(')');
             
             return (
-              <div key={metric.id} className={`bg-gray-800 p-4 rounded-lg border ${needsFix ? 'border-yellow-600/50' : 'border-gray-700'} space-y-3`}>
+              <div key={metric.id} className={`bg-gray-800 p-4 rounded-lg border ${needsFix || noCaptureGroup ? 'border-yellow-600/50' : 'border-gray-700'} space-y-3`}>
                 <div className="flex justify-between items-start">
                   <div className="flex-1 min-w-0">
                     <h3 className="font-bold flex items-center truncate">
@@ -178,6 +179,20 @@ export default function MetricsPanel() {
                               className="bg-yellow-600 hover:bg-yellow-500 text-white text-[10px] px-2 py-0.5 rounded"
                             >
                               自动修正
+                            </button>
+                          </div>
+                        )}
+                        {!needsFix && noCaptureGroup && (
+                          <div className="mt-2 flex items-center justify-between bg-orange-900/20 p-2 rounded border border-orange-800/30">
+                            <span className="text-[10px] text-orange-400 font-medium">提示: 缺少捕获组 ()</span>
+                            <button
+                              onClick={() => {
+                                const newRegex = metric.regex.replace(/(\\d\+)/g, '($1)');
+                                updateMetricRegex(metric.id, newRegex === metric.regex ? `(${metric.regex})` : newRegex);
+                              }}
+                              className="bg-orange-600 hover:bg-orange-500 text-white text-[10px] px-2 py-0.5 rounded"
+                            >
+                              尝试补全
                             </button>
                           </div>
                         )}

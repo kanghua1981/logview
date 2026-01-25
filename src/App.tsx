@@ -9,7 +9,17 @@ import SearchResultsPanel from "./components/SearchResultsPanel";
 import "./App.css";
 
 function App() {
-  const { activeView, setActiveView, setFontSize, isSearchPanelOpen, setSearchPanelOpen } = useLogStore();
+  const { 
+    activeView, 
+    setActiveView, 
+    setFontSize, 
+    isSearchPanelOpen, 
+    setSearchPanelOpen,
+    isSidebarOpen,
+    setSidebarOpen,
+    isAiPanelOpen,
+    setAiPanelOpen
+  } = useLogStore();
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
@@ -26,6 +36,18 @@ function App() {
         e.preventDefault();
         setSearchPanelOpen(!isSearchPanelOpen);
       }
+      
+      // Ctrl + B 切换侧边栏
+      if (e.ctrlKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setSidebarOpen(!isSidebarOpen);
+      }
+
+      // Ctrl + Shift + A 切换 AI 面板
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'a') {
+        e.preventDefault();
+        setAiPanelOpen(!isAiPanelOpen);
+      }
     };
 
     window.addEventListener('wheel', handleWheel, { passive: false });
@@ -40,7 +62,7 @@ function App() {
     <div className="h-screen w-screen flex flex-col bg-gray-900 text-white overflow-hidden">
       <Header />
       <div className="flex-1 flex overflow-hidden">
-        <Sidebar onViewChange={setActiveView} currentView={activeView} />
+        {isSidebarOpen && <Sidebar onViewChange={setActiveView} currentView={activeView} />}
         <main className="flex-1 flex flex-col overflow-hidden relative bg-gray-900">
           <div className="flex-1 flex flex-col overflow-hidden">
             {activeView === 'log' && <LogViewer />}

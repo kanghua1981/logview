@@ -1,17 +1,51 @@
 import { useLogStore, LogLine } from '../store';
 import { Virtuoso } from 'react-virtuoso';
+import { useState, useEffect } from 'react';
 
 export default function SearchResultsPanel() {
   const searchResults = useLogStore((state) => state.searchResults);
   const searchQuery = useLogStore((state) => state.searchQuery);
   const isSearchPanelOpen = useLogStore((state) => state.isSearchPanelOpen);
   const setSearchPanelOpen = useLogStore((state) => state.setSearchPanelOpen);
+  const searchPanelHeight = useLogStore((state) => state.searchPanelHeight);
+  const setSearchPanelHeight = useLogStore((state) => state.setSearchPanelHeight);
   const setScrollTargetLine = useLogStore((state) => state.setScrollTargetLine);
   const setActiveView = useLogStore((state) => state.setActiveView);
   const fontSize = useLogStore((state) => state.fontSize);
   const searchOnlySelectedSessions = useLogStore((state) => state.searchOnlySelectedSessions);
   const selectedSessionIds = useLogStore((state) => state.selectedSessionIds);
   const isSearchRegex = useLogStore((state) => state.isSearchRegex);
+
+  const [isResizing, setIsResizing] = useState(false);
+
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isResizing) return;
+      const newHeight = Math.max(150, Math.min(window.innerHeight * 0.7, window.innerHeight - e.clientY));
+      setSearchPanelHeight(newHeight);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'row-resize';
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'default';
+    };
+  }, [isResizing, setSearchPanelHeight]);
 
   if (!isSearchPanelOpen) return null;
 
@@ -39,7 +73,16 @@ export default function SearchResultsPanel() {
   };
 
   return (
-    <div className="h-64 bg-gray-900 border-t border-gray-700 flex flex-col z-40">
+    <div 
+      className="relative bg-gray-900 border-t border-gray-700 flex flex-col z-40 select-none"
+      style={{ height: `${searchPanelHeight}px` }}
+    >
+      {/* Resizer Handle (Top Side) */}
+      <div
+        onMouseDown={handleMouseDown}
+        className={`absolute top-0 left-0 right-0 h-1 cursor-row-resize z-50 hover:bg-blue-500/50 transition-colors ${isResizing ? 'bg-blue-500 h-1' : ''}`}
+      />
+
       <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
         <div className="flex items-center space-x-4">
           <span className="text-sm font-semibold text-gray-300">

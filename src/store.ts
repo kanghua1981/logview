@@ -115,6 +115,7 @@ interface LogViewState {
   searchQuery: string;
   searchResults: LogLine[];
   isSearchPanelOpen: boolean;
+  searchPanelHeight: number;
   searchOnlySelectedSessions: boolean;
   isSearchRegex: boolean;
 
@@ -137,10 +138,15 @@ interface LogViewState {
   aiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }>;
   isAiLoading: boolean;
   isAiPanelOpen: boolean;
+  aiPanelWidth: number;
   aiEndpoint: string;
   aiModel: string;
   aiApiKey: string;
   aiSystemPrompt: string;
+
+  // 布局相关
+  isSidebarOpen: boolean;
+  sidebarWidth: number;
 
   // Actions
   addFile: (file: LogFile) => void;
@@ -186,6 +192,7 @@ interface LogViewState {
   setSearchQuery: (query: string) => void;
   performSearch: () => void;
   setSearchPanelOpen: (open: boolean) => void;
+  setSearchPanelHeight: (height: number) => void;
   setSearchOnlySelectedSessions: (only: boolean) => void;
   setSearchRegex: (isRegex: boolean) => void;
   addRefinementFilter: (term: string) => void;
@@ -199,8 +206,13 @@ interface LogViewState {
   addAiMessage: (message: { role: 'user' | 'assistant' | 'system', content: string }) => void;
   setAiLoading: (loading: boolean) => void;
   setAiPanelOpen: (open: boolean) => void;
+  setAiPanelWidth: (width: number) => void;
   clearAiMessages: () => void;
   setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string, systemPrompt?: string }) => void;
+
+  // 布局 Actions
+  setSidebarOpen: (open: boolean) => void;
+  setSidebarWidth: (width: number) => void;
 
   // 新增指标 Actions
   addMetric: (name: string, regex: string) => void;
@@ -248,6 +260,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   searchQuery: '',
   searchResults: [],
   isSearchPanelOpen: false,
+  searchPanelHeight: Number(localStorage.getItem('search_panel_height')) || 256,
   searchOnlySelectedSessions: false,
   isSearchRegex: false,
   fontSize: Number(localStorage.getItem('font_size')) || 12,
@@ -261,10 +274,14 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   aiMessages: [],
   isAiLoading: false,
   isAiPanelOpen: false,
+  aiPanelWidth: Number(localStorage.getItem('ai_panel_width')) || 384,
   aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.deepseek.com',
   aiModel: localStorage.getItem('ai_model') || 'deepseek-chat',
   aiApiKey: localStorage.getItem('ai_api_key') || '',
   aiSystemPrompt: localStorage.getItem('ai_system_prompt') || '你是一个专业的日志分析专家，擅长从混合日志中定位根因。请基于提供的路径上下文和采样行进行推理。',
+  
+  isSidebarOpen: localStorage.getItem('is_sidebar_open') !== 'false',
+  sidebarWidth: Number(localStorage.getItem('sidebar_width')) || 320,
   
   // ... 其他 Actions 保持不变
   addFile: (file) => set((state) => {
@@ -478,6 +495,10 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   addAiMessage: (message) => set((state) => ({ aiMessages: [...state.aiMessages, message] })),
   setAiLoading: (loading) => set({ isAiLoading: loading }),
   setAiPanelOpen: (open) => set({ isAiPanelOpen: open }),
+  setAiPanelWidth: (width) => {
+    localStorage.setItem('ai_panel_width', width.toString());
+    set({ aiPanelWidth: width });
+  },
   clearAiMessages: () => set({ aiMessages: [] }),
   setAiConfig: (config) => set((state) => {
     if (config.endpoint !== undefined) localStorage.setItem('ai_endpoint', config.endpoint);
@@ -492,7 +513,20 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     };
   }),
   
+  setSidebarOpen: (open) => {
+    localStorage.setItem('is_sidebar_open', open.toString());
+    set({ isSidebarOpen: open });
+  },
+  setSidebarWidth: (width) => {
+    localStorage.setItem('sidebar_width', width.toString());
+    set({ sidebarWidth: width });
+  },
+  
   setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
+  setSearchPanelHeight: (height) => {
+    localStorage.setItem('search_panel_height', height.toString());
+    set({ searchPanelHeight: height });
+  },
   setSearchOnlySelectedSessions: (only) => {
     set({ searchOnlySelectedSessions: only });
     get().performSearch();
