@@ -17,8 +17,7 @@ import {
 export default function MetricsPanel() {
   const { 
     metrics, addMetric, removeMetric, toggleMetric, updateMetricData, updateMetricRegex,
-    files, currentFileId, setActiveView, setScrollTargetLine, sessions, selectedSessionIds,
-    setAiPanelOpen, addAiMessage
+    files, currentFileId, setActiveView, setScrollTargetLine, sessions, selectedSessionIds
   } = useLogStore();
   const [newName, setNewName] = useState('');
   const [newRegex, setNewRegex] = useState('');

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { useLogStore } from '../store';
 import FileManager from './FileManager';
 import SessionList from './SessionList';
