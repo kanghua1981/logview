@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useLogStore } from '../store';
 import { invoke } from '@tauri-apps/api/core';
+import { processCommand } from '../utils/commandProcessor';
 import {
   LineChart,
   Line,
@@ -16,7 +17,8 @@ import {
 export default function MetricsPanel() {
   const { 
     metrics, addMetric, removeMetric, toggleMetric, updateMetricData, updateMetricRegex,
-    files, currentFileId, setActiveView, setScrollTargetLine, sessions, selectedSessionIds
+    files, currentFileId, setActiveView, setScrollTargetLine, sessions, selectedSessionIds,
+    setAiPanelOpen, addAiMessage
   } = useLogStore();
   const [newName, setNewName] = useState('');
   const [newRegex, setNewRegex] = useState('');
@@ -32,6 +34,12 @@ export default function MetricsPanel() {
       setNewName('');
       setNewRegex('');
     }
+  };
+
+  const handleAiAssist = () => {
+    if (!currentFile) return;
+    const prompt = "请分析当前的日志内容，识别并提取出其中的关键数值指标（如：码率 Kbps、帧率 fps、内存 MB、耗时 ms 等），并以 `FILTER: 正则 || 描述` 的格式给出推荐建议。";
+    processCommand(prompt, 'ai');
   };
 
   const handleStartEdit = (metric: any) => {
@@ -124,6 +132,13 @@ export default function MetricsPanel() {
             className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded text-sm transition-colors"
           >
             添加指标
+          </button>
+          <button
+            onClick={handleAiAssist}
+            title="让 AI 帮你写正则"
+            className="flex items-center space-x-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 border border-indigo-500/30 px-3 py-2 rounded text-sm transition-all"
+          >
+            <span>✨ AI 助手</span>
           </button>
         </div>
       </div>

@@ -6,6 +6,7 @@ import LogViewer from "./components/LogViewer";
 import Dashboard from "./components/Dashboard";
 import MetricsPanel from "./components/MetricsPanel";
 import SearchResultsPanel from "./components/SearchResultsPanel";
+import AiSidePanel from "./components/AiSidePanel";
 import "./App.css";
 
 function App() {
@@ -71,6 +72,7 @@ function App() {
           </div>
           <SearchResultsPanel />
         </main>
+        <AiSidePanel />
       </div>
     </div>
   );

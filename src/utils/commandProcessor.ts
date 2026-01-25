@@ -155,13 +155,14 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
       
       const technicalProtocol = `
 ---
-注意：如果发现某些关键字或模式对进一步排查很有帮助，请在回复末尾按照以下格式建议过滤条件（每行一个）:
-FILTER: <pattern> || <说明建议理由>
+注意：
+1. 如果发现关键字有助于排查，请在末尾按此格式建议过滤:
+   FILTER: <pattern> || <说明建议理由>
+   (pattern 规范: 直接写正则，或以 ! 开头表示排除，或以 = 开头表示精确匹配)
 
-其中 <pattern> 遵循以下规范:
-- 正则表达式: 直接写正则内容 (例如: attr_get_value.*failed)
-- 排除关键字: 以 ! 开头 (例如: !ignore_this)
-- 精确匹配: 以 = 开头 (例如: =exact_match)
+2. 如果日志中有可量化的数值（如内存、延迟、温度、码率等），请按此格式建议指标提取:
+   METRIC: <指标名称> || <带捕获组的正则表达式> || <指标含义说明>
+   (例如: METRIC: 内存占用 || free:(\d+) || 监控剩余内存变化趋势)
 `;
 
       const response = await invoke<string>('call_openai_api', {

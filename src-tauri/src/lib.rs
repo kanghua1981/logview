@@ -1332,6 +1332,11 @@ async fn call_openai_api(
     Ok(content)
 }
 
+#[tauri::command]
+async fn save_text_file(path: String, content: String) -> Result<(), String> {
+    fs::write(path, content).map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1373,7 +1378,8 @@ pub fn run() {
             write_config_file,
             read_config_file,
             find_first_occurrence,
-            call_openai_api
+            call_openai_api,
+            save_text_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

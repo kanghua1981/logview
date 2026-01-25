@@ -1,6 +1,8 @@
 import ReactMarkdown from 'react-markdown';
 import { useLogStore } from '../store';
 import { useEffect, useRef, useState } from 'react';
+import { save } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 
 export default function AiSidePanel() {
   const isAiPanelOpen = useLogStore((state) => state.isAiPanelOpen);
@@ -11,6 +13,8 @@ export default function AiSidePanel() {
   const isAiLoading = useLogStore((state) => state.isAiLoading);
   const clearAiMessages = useLogStore((state) => state.clearAiMessages);
   const addRefinementFilter = useLogStore((state) => state.addRefinementFilter);
+  const activeView = useLogStore((state) => state.activeView);
+  const addMetric = useLogStore((state) => state.addMetric);
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isResizing, setIsResizing] = useState(false);
@@ -55,18 +59,48 @@ export default function AiSidePanel() {
   const parseFilters = (content: string) => {
     const lines = content.split('\n');
     const filters: { regex: string; reason: string }[] = [];
+    const metrics: { name: string; regex: string; reason: string }[] = [];
     const cleanLines: string[] = [];
 
     lines.forEach(line => {
-      const match = line.match(/^FILTER:\s*(.*?)\s*\|\|\s*(.*)$/);
-      if (match) {
-        filters.push({ regex: match[1], reason: match[2] });
+      const filterMatch = line.match(/^FILTER:\s*(.*?)\s*\|\|\s*(.*)$/);
+      const metricMatch = line.match(/^METRIC:\s*(.*?)\s*\|\|\s*(.*?)\s*\|\|\s*(.*)$/);
+      
+      if (filterMatch) {
+        filters.push({ regex: filterMatch[1], reason: filterMatch[2] });
+      } else if (metricMatch) {
+        metrics.push({ name: metricMatch[1], regex: metricMatch[2], reason: metricMatch[3] });
       } else {
         cleanLines.push(line);
       }
     });
 
-    return { cleanContent: cleanLines.join('\n'), filters };
+    return { cleanContent: cleanLines.join('\n'), filters, metrics };
+  };
+
+  const handleExportReport = async () => {
+    if (aiMessages.length === 0) return;
+    
+    try {
+      const path = await save({
+        filters: [{ name: 'Markdown Report', extensions: ['md'] }],
+        defaultPath: `ai_analysis_report_${new Date().toISOString().replace(/[:.]/g, '-')}.md`
+      });
+
+      if (path) {
+        const reportContent = aiMessages.map(msg => 
+          `### ${msg.role === 'user' ? '👤 Question' : '✨ Analysis'}\n\n${msg.content}\n\n---`
+        ).join('\n\n');
+        
+        const fullReport = `# LogView AI Analysis Report\n\nGenerated at: ${new Date().toLocaleString()}\n\n${reportContent}`;
+        
+        await invoke('save_text_file', { path, content: fullReport });
+        alert('报告导出成功！');
+      }
+    } catch (e) {
+      console.error('Failed to export AI report:', e);
+      alert('导出报告失败: ' + e);
+    }
   };
 
   if (!isAiPanelOpen) return null;
@@ -88,6 +122,16 @@ export default function AiSidePanel() {
           <h3 className="font-bold text-gray-200">AI 智能分析</h3>
         </div>
         <div className="flex items-center space-x-2">
+          <button 
+            onClick={handleExportReport}
+            className="p-1.5 hover:bg-gray-700 rounded text-gray-400 hover:text-blue-400"
+            title="导出分析报告 (.md)"
+            disabled={aiMessages.length === 0}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+          </button>
           <button 
             onClick={clearAiMessages}
             className="p-1.5 hover:bg-gray-700 rounded text-gray-400 hover:text-red-400"
@@ -117,7 +161,9 @@ export default function AiSidePanel() {
           </div>
         ) : (
           aiMessages.map((msg, idx) => {
-            const { cleanContent, filters } = msg.role === 'assistant' ? parseFilters(msg.content) : { cleanContent: msg.content, filters: [] };
+            const { cleanContent, filters, metrics } = msg.role === 'assistant' 
+              ? parseFilters(msg.content) 
+              : { cleanContent: msg.content, filters: [], metrics: [] };
             
             return (
               <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -132,41 +178,101 @@ export default function AiSidePanel() {
                         <ReactMarkdown>{cleanContent}</ReactMarkdown>
                       </div>
                       
-                      {filters.length > 0 && (
+                      {(filters.length > 0 || metrics.length > 0) && (
                         <div className="pt-2 border-t border-gray-700 space-y-2">
-                          <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">推荐过滤建议:</p>
-                          {filters.map((f, i) => {
-                            // 确定真正的过滤项（带前缀）
-                            let finalFilter = f.regex;
-                            if (!finalFilter.startsWith('!') && !finalFilter.startsWith('=') && !finalFilter.startsWith('/')) {
-                              finalFilter = '/' + finalFilter;
-                            }
+                          {filters.length > 0 && (
+                            <>
+                              <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider">推荐过滤建议:</p>
+                              {filters.map((f, i) => {
+                                // 确定真正的过滤项（带前缀）
+                                let finalFilter = f.regex;
+                                if (!finalFilter.startsWith('!') && !finalFilter.startsWith('=') && !finalFilter.startsWith('/')) {
+                                  finalFilter = '/' + finalFilter;
+                                }
 
-                            // 获取显示图标和样式
-                            const isRegex = finalFilter.startsWith('/');
-                            const isExclude = finalFilter.startsWith('!');
-                            const isExact = finalFilter.startsWith('=');
-                            
-                            const icon = isRegex ? '/' : isExclude ? '!' : isExact ? '=' : '🔎';
-                            const iconColor = isRegex ? 'text-purple-400' : isExclude ? 'text-red-400' : isExact ? 'text-emerald-400' : 'text-blue-400';
+                                // 获取显示图标和样式
+                                const isRegex = finalFilter.startsWith('/');
+                                const isExclude = finalFilter.startsWith('!');
+                                const isExact = finalFilter.startsWith('=');
+                                
+                                const icon = isRegex ? '/' : isExclude ? '!' : isExact ? '=' : '🔎';
+                                const iconColor = isRegex ? 'text-purple-400' : isExclude ? 'text-red-400' : isExact ? 'text-emerald-400' : 'text-blue-400';
 
-                            return (
-                              <button
-                                key={i}
-                                onClick={() => addRefinementFilter(finalFilter)}
-                                className="w-full text-left p-2 rounded bg-blue-900/10 hover:bg-blue-900/30 border border-blue-800/30 transition-all text-[11px] group"
-                              >
-                                <div className="flex items-center justify-between mb-0.5">
-                                  <div className="flex items-center space-x-1">
-                                    <span className={`${iconColor} font-bold mr-1`}>{icon}</span>
-                                    <span className="font-mono text-blue-300 font-bold">{f.regex.replace(/^[!=/]/, '')}</span>
+                                return (
+                                  <div
+                                    key={i}
+                                    className="w-full text-left p-2 rounded bg-blue-900/10 border border-blue-800/30 transition-all text-[11px] group mb-2 hover:border-blue-700/50"
+                                  >
+                                    <div className="mb-2">
+                                      <div className="flex items-center space-x-1">
+                                        <span className={`${iconColor} font-bold mr-1`}>{icon}</span>
+                                        <span className="font-mono text-blue-300 font-bold break-all">{f.regex.replace(/^[!=/]/, '')}</span>
+                                      </div>
+                                      <div className="text-gray-400 leading-tight italic mt-1">{f.reason}</div>
+                                    </div>
+                                    
+                                    <div className="flex gap-2">
+                                      <button
+                                        onClick={() => addRefinementFilter(finalFilter)}
+                                        title="添加到面包屑过滤器"
+                                        className={`flex-1 py-1 px-1.5 rounded border transition-all flex items-center justify-center gap-1
+                                          ${activeView !== 'metrics' 
+                                            ? 'bg-blue-600/30 border-blue-500/50 text-blue-100 hover:bg-blue-500/40' 
+                                            : 'bg-blue-900/20 border-blue-800/40 text-blue-400 hover:bg-blue-800/30'}`}
+                                      >
+                                        <span className="opacity-70">🔎</span>
+                                        <span>添加过滤</span>
+                                      </button>
+                                      
+                                      {(activeView === 'metrics' || f.regex.includes('(')) && (
+                                        <button
+                                          onClick={() => {
+                                            const nameSnippet = f.reason.split(/[，。：: ]/)[0].substring(0, 12);
+                                            addMetric(nameSnippet || '新指标', f.regex.replace(/^[!=/]/, ''));
+                                          }}
+                                          title="作为数据指标提取图表"
+                                          className={`flex-1 py-1 px-1.5 rounded border transition-all flex items-center justify-center gap-1
+                                            ${activeView === 'metrics' 
+                                              ? 'bg-purple-600/30 border-purple-500/50 text-purple-100 hover:bg-purple-500/40' 
+                                              : 'bg-purple-900/20 border-purple-800/40 text-purple-400 hover:bg-purple-800/30'}`}
+                                        >
+                                          <span className="opacity-70">📈</span>
+                                          <span>设为指标</span>
+                                        </button>
+                                      )}
+                                    </div>
                                   </div>
-                                  <span className="opacity-0 group-hover:opacity-100 text-blue-300 transition-opacity">应用 →</span>
+                                );
+                              })}
+                            </>
+                          )}
+
+                          {metrics.length > 0 && (
+                            <>
+                              <p className="text-[10px] text-purple-500 font-bold uppercase tracking-wider mt-3">推荐数值指标:</p>
+                              {metrics.map((m, i) => (
+                                <div
+                                  key={`m-${i}`}
+                                  className="w-full text-left p-2 rounded bg-purple-900/10 border border-purple-800/30 transition-all text-[11px] group mb-2 hover:border-purple-700/50"
+                                >
+                                  <div className="mb-2">
+                                    <div className="flex items-center justify-between">
+                                      <span className="font-bold text-purple-300">📈 {m.name}</span>
+                                      <span className="font-mono text-gray-500 text-[9px]">{m.regex}</span>
+                                    </div>
+                                    <div className="text-gray-400 leading-tight italic mt-1">{m.reason}</div>
+                                  </div>
+                                  
+                                  <button
+                                    onClick={() => addMetric(m.name, m.regex)}
+                                    className="w-full py-1 px-1.5 rounded border bg-purple-600/30 border-purple-500/50 text-purple-100 hover:bg-purple-500/40 transition-all flex items-center justify-center gap-1"
+                                  >
+                                    <span>确认并添加到指标面板</span>
+                                  </button>
                                 </div>
-                                <div className="text-gray-400 leading-tight italic">{f.reason}</div>
-                              </button>
-                            );
-                          })}
+                              ))}
+                            </>
+                          )}
                         </div>
                       )}
                     </div>

@@ -5,7 +5,6 @@ import { loadLogFile } from '../utils/logLoader';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { processCommand } from '../utils/commandProcessor';
-import AiSidePanel from './AiSidePanel';
 
 export default function LogViewer() {
   const filteredIndices = useLogStore((state) => state.filteredIndices);
@@ -637,7 +636,6 @@ export default function LogViewer() {
         </div>
       )}
       </div>
-      <AiSidePanel />
     </div>
   );
 }
