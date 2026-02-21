@@ -124,6 +124,12 @@ interface LogViewState {
   refinementFilters: string[];
   transientRefinement: string;
 
+  // 双分窗模式
+  isDualPane: boolean;  dualPaneSplit: number;  rightFilteredIndices: number[];
+  rightRefinementFilters: string[];
+  rightTransientRefinement: string;
+  rightScrollTargetLine: number | null;
+
   // 新增指标追踪
   metrics: LogMetric[];
   
@@ -199,6 +205,17 @@ interface LogViewState {
   removeRefinementFilter: (index: number) => void;
   setRefinementFilters: (filters: string[]) => void;
   setTransientRefinement: (term: string) => void;
+
+  // 双分窗模式 Actions
+  setDualPane: (isDual: boolean) => void;
+  setDualPaneSplit: (split: number) => void;
+  setRightScrollTargetLine: (line: number | null) => void;
+  addRightRefinementFilter: (term: string) => void;
+  removeRightRefinementFilter: (index: number) => void;
+  setRightRefinementFilters: (filters: string[]) => void;
+  setRightTransientRefinement: (term: string) => void;
+  filterRightLogLines: () => Promise<void>;
+
   setFontSize: (size: number | ((prev: number) => number)) => void;
 
   // AI Actions
@@ -266,6 +283,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   fontSize: Number(localStorage.getItem('font_size')) || 12,
   refinementFilters: [],
   transientRefinement: '',
+
+  // 双分窗模式初始状态
+  isDualPane: localStorage.getItem('is_dual_pane') === 'true',
+  dualPaneSplit: Number(localStorage.getItem('dual_pane_split')) || 50,
+  rightFilteredIndices: [],
+  rightRefinementFilters: [],
+  rightTransientRefinement: '',
+  rightScrollTargetLine: null,
+
   analysisStats: [],
   analysisTimeGaps: [],
   analysisWorkflows: [],
@@ -275,15 +301,14 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   isAiLoading: false,
   isAiPanelOpen: false,
   aiPanelWidth: Number(localStorage.getItem('ai_panel_width')) || 384,
-  aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.deepseek.com',
-  aiModel: localStorage.getItem('ai_model') || 'deepseek-chat',
+  aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.openai.com/v1',
+  aiModel: localStorage.getItem('ai_model') || 'gpt-4o',
   aiApiKey: localStorage.getItem('ai_api_key') || '',
   aiSystemPrompt: localStorage.getItem('ai_system_prompt') || '你是一个专业的日志分析专家，擅长从混合日志中定位根因。请基于提供的路径上下文和采样行进行推理。',
   
   isSidebarOpen: localStorage.getItem('is_sidebar_open') !== 'false',
   sidebarWidth: Number(localStorage.getItem('sidebar_width')) || 320,
   
-  // ... 其他 Actions 保持不变
   addFile: (file) => set((state) => {
     const exists = state.files.find(f => f.path === file.path);
     if (exists) {
@@ -343,6 +368,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setSelectedSessions: (ids) => {
     set({ selectedSessionIds: ids });
     get().filterLogLines();
+    if (get().isDualPane) get().filterRightLogLines();
     if (get().isSearchPanelOpen && get().searchOnlySelectedSessions) {
       get().performSearch();
     }
@@ -356,6 +382,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       lineContents: new Map()
     });
     get().filterLogLines();
+    if (get().isDualPane) get().filterRightLogLines();
   },
 
   setTimeGapThreshold: (threshold) => {
@@ -378,6 +405,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     localStorage.setItem('log_level_filter', JSON.stringify(levels));
     set({ logLevelFilter: levels });
     get().filterLogLines();
+    if (get().isDualPane) get().filterRightLogLines();
   },
 
   updateLogLinesContent: (updatedLines) => {
@@ -401,32 +429,43 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     const newHighlights = [...state.highlights, newHighlight];
     localStorage.setItem('highlights', JSON.stringify(newHighlights));
     const newState = { highlights: newHighlights };
-    setTimeout(() => get().filterLogLines(), 0);
+    setTimeout(() => {
+      get().filterLogLines();
+      if (get().isDualPane) get().filterRightLogLines();
+    }, 0);
     return newState;
   }),
   removeHighlight: (id) => set((state) => {
     const newHighlights = state.highlights.filter(h => h.id !== id);
     localStorage.setItem('highlights', JSON.stringify(newHighlights));
     const newState = { highlights: newHighlights };
-    setTimeout(() => get().filterLogLines(), 0);
+    setTimeout(() => {
+      get().filterLogLines();
+      if (get().isDualPane) get().filterRightLogLines();
+    }, 0);
     return newState;
   }),
   toggleHighlight: (id) => set((state) => {
     const newHighlights = state.highlights.map(h => h.id === id ? { ...h, enabled: !h.enabled } : h);
     localStorage.setItem('highlights', JSON.stringify(newHighlights));
     const newState = { highlights: newHighlights };
-    setTimeout(() => get().filterLogLines(), 0);
+    setTimeout(() => {
+      get().filterLogLines();
+      if (get().isDualPane) get().filterRightLogLines();
+    }, 0);
     return newState;
   }),
   setShowOnlyHighlights: (show) => {
     localStorage.setItem('show_only_highlights', show.toString());
     set({ showOnlyHighlights: show });
     get().filterLogLines();
+    if (get().isDualPane) get().filterRightLogLines();
   },
   setHighlightContextLines: (lines) => {
     localStorage.setItem('highlight_context_lines', lines.toString());
     set({ highlightContextLines: lines });
     get().filterLogLines();
+    if (get().isDualPane) get().filterRightLogLines();
   },
 
   addProfile: (profile) => set((state) => {
@@ -473,6 +512,53 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   setCurrentVisibleLine: (line) => set({ currentVisibleLine: line }),
   
   setSearchQuery: (query) => set({ searchQuery: query }),
+  performSearch: async () => {
+    const { searchQuery, isSearchRegex, searchOnlySelectedSessions, selectedSessionIds, sessions } = get();
+    if (!searchQuery.trim()) {
+      set({ searchResults: [], isSearchPanelOpen: false });
+      return;
+    }
+    
+    try {
+      let lineRanges = null;
+      if (searchOnlySelectedSessions && selectedSessionIds.length > 0) {
+        lineRanges = selectedSessionIds.map(id => {
+          const s = sessions.find(sess => sess.id === id);
+          return s ? [s.startLine, s.endLine] : null;
+        }).filter(Boolean);
+      }
+
+      const results = await invoke<any[]>('search_log', {
+        query: searchQuery,
+        isRegex: isSearchRegex,
+        lineRanges
+      });
+      
+      set({ 
+        searchResults: results.map(l => ({
+          lineNumber: l.line_number,
+          content: l.content,
+          level: l.level as any
+        })), 
+        isSearchPanelOpen: true 
+      });
+    } catch (e) {
+      console.error('Search failed:', e);
+    }
+  },
+  setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
+  setSearchPanelHeight: (height) => {
+    localStorage.setItem('search_panel_height', height.toString());
+    set({ searchPanelHeight: height });
+  },
+  setSearchOnlySelectedSessions: (only) => {
+    set({ searchOnlySelectedSessions: only });
+    get().performSearch();
+  },
+  setSearchRegex: (isRegex) => {
+    set({ isSearchRegex: isRegex });
+    get().performSearch();
+  },
   addRefinementFilter: (term) => {
     if (!term.trim()) return;
     set(state => ({ refinementFilters: [...state.refinementFilters, term.trim()] }));
@@ -490,6 +576,78 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     set({ transientRefinement: term });
     get().filterLogLines();
   },
+
+  setDualPane: (isDual) => {
+    localStorage.setItem('is_dual_pane', isDual.toString());
+    set({ isDualPane: isDual });
+    if (isDual) {
+      get().filterRightLogLines();
+    }
+  },
+  setDualPaneSplit: (split) => {
+    localStorage.setItem('dual_pane_split', split.toString());
+    set({ dualPaneSplit: split });
+  },
+  setRightScrollTargetLine: (line) => set({ rightScrollTargetLine: line, flashLine: line }),
+  addRightRefinementFilter: (term) => {
+    if (!term.trim()) return;
+    set(state => ({ rightRefinementFilters: [...state.rightRefinementFilters, term.trim()] }));
+    get().filterRightLogLines();
+  },
+  removeRightRefinementFilter: (index) => {
+    set(state => ({ rightRefinementFilters: state.rightRefinementFilters.filter((_, i) => i !== index) }));
+    get().filterRightLogLines();
+  },
+  setRightRefinementFilters: (filters) => {
+    set({ rightRefinementFilters: filters });
+    get().filterRightLogLines();
+  },
+  setRightTransientRefinement: (term) => {
+    set({ rightTransientRefinement: term });
+    get().filterRightLogLines();
+  },
+  filterRightLogLines: async () => {
+    const { 
+      logLevelFilter, selectedSessionIds, sessions, 
+      rightRefinementFilters, rightTransientRefinement, lineCount
+    } = get();
+    
+    let lineRanges: [number, number][] | null = null;
+    if (selectedSessionIds && selectedSessionIds.length > 0) {
+      lineRanges = selectedSessionIds.map(id => {
+        const s = sessions.find(sess => sess.id === id);
+        return s ? [s.startLine, s.endLine] : null;
+      }).filter((r): r is [number, number] => r !== null);
+    }
+
+    try {
+      const indices = await invoke<number[]>('get_filtered_indices', {
+        logLevels: logLevelFilter,
+        lineRanges: lineRanges,
+        highlights: [], 
+        contextLines: 0,
+        refinements: [...rightRefinementFilters, rightTransientRefinement].filter(r => r.trim() !== '')
+      });
+      set({ rightFilteredIndices: indices });
+    } catch (err) {
+      const simpleIndices = [];
+      if (lineRanges) {
+        for (const [start, end] of lineRanges) {
+          for (let i = start - 1; i < end; i++) simpleIndices.push(i);
+        }
+      } else {
+        for (let i = 0; i < lineCount; i++) simpleIndices.push(i);
+      }
+      set({ rightFilteredIndices: simpleIndices });
+    }
+  },
+
+  setFontSize: (size) => set((state) => {
+    const newSize = typeof size === 'function' ? size(state.fontSize) : size;
+    const clampedSize = Math.max(8, Math.min(30, newSize));
+    localStorage.setItem('font_size', clampedSize.toString());
+    return { fontSize: clampedSize };
+  }),
 
   setAiMessages: (messages) => set({ aiMessages: messages }),
   addAiMessage: (message) => set((state) => ({ aiMessages: [...state.aiMessages, message] })),
@@ -522,62 +680,6 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     set({ sidebarWidth: width });
   },
   
-  setSearchPanelOpen: (open) => set({ isSearchPanelOpen: open }),
-  setSearchPanelHeight: (height) => {
-    localStorage.setItem('search_panel_height', height.toString());
-    set({ searchPanelHeight: height });
-  },
-  setSearchOnlySelectedSessions: (only) => {
-    set({ searchOnlySelectedSessions: only });
-    get().performSearch();
-  },
-  setSearchRegex: (isRegex) => {
-    set({ isSearchRegex: isRegex });
-    get().performSearch();
-  },
-  setFontSize: (size) => set((state) => {
-    const newSize = typeof size === 'function' ? size(state.fontSize) : size;
-    const clampedSize = Math.max(8, Math.min(30, newSize)); // 限制在 8px - 30px
-    localStorage.setItem('font_size', clampedSize.toString());
-    return { fontSize: clampedSize };
-  }),
-  performSearch: async () => {
-    const { searchQuery, isSearchRegex, searchOnlySelectedSessions, selectedSessionIds, sessions } = get();
-    if (!searchQuery.trim()) {
-      set({ searchResults: [], isSearchPanelOpen: false });
-      return;
-    }
-    
-    try {
-      // 计算搜索范围
-      let lineRanges = null;
-      if (searchOnlySelectedSessions && selectedSessionIds.length > 0) {
-        // 只有在选边了会话的情况下才应用范围限制
-        lineRanges = selectedSessionIds.map(id => {
-          const s = sessions.find(sess => sess.id === id);
-          return s ? [s.startLine, s.endLine] : null;
-        }).filter(Boolean);
-      }
-
-      const results = await invoke<any[]>('search_log', {
-        query: searchQuery, // 不再在前端 trim，改由后端精确处理换行符
-        isRegex: isSearchRegex,
-        lineRanges
-      });
-      
-      set({ 
-        searchResults: results.map(l => ({
-          lineNumber: l.line_number,
-          content: l.content,
-          level: l.level as any
-        })), 
-        isSearchPanelOpen: true 
-      });
-    } catch (e) {
-      console.error('Search failed:', e);
-    }
-  },
-
   setAnalysisStatsResults: (stats, gaps) => set({ 
     analysisStats: stats, 
     analysisTimeGaps: gaps, 
@@ -588,14 +690,11 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     hasAnalyzedWorkflows: true 
   }),
 
-  // 指标 Actions 实现
   addMetric: (name, regex) => set((state) => {
     const colors = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981'];
     const newMetrics = [...state.metrics, {
       id: Date.now().toString(),
-      name,
-      regex,
-      data: [],
+      name, regex, data: [],
       color: colors[state.metrics.length % colors.length],
       enabled: true
     }];
@@ -622,7 +721,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   }),
   exportConfig: () => {
     const state = get();
-    const config = {
+    return JSON.stringify({
       version: '1.0',
       timestamp: new Date().toISOString(),
       analysis: {
@@ -636,17 +735,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
       sessionSplitters: state.sessionSplitters,
       highlights: state.highlights,
       metrics: state.metrics.map(({ id, name, regex, color, enabled }) => ({
-        id, name, regex, color, enabled, data: [] // 不导出提取出的数据
+        id, name, regex, color, enabled, data: []
       }))
-    };
-    return JSON.stringify(config, null, 2);
+    }, null, 2);
   },
 
   importConfig: (json: string) => {
     try {
       const config = JSON.parse(json);
       if (!config.analysis) throw new Error('无效的配置文件');
-
       set({
         bootMarkerRegex: config.analysis.bootMarkerRegex || '',
         logLevelRegex: config.analysis.logLevelRegex || '',
@@ -658,25 +755,9 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         highlights: config.highlights || [],
         metrics: config.metrics || [],
       });
-
-      // 同步到本地存储
-      localStorage.setItem('session_splitters', JSON.stringify(config.sessionSplitters || []));
-      localStorage.setItem('active_session_mode', config.analysis.activeSessionMode || 'boot');
-      localStorage.setItem('highlights', JSON.stringify(config.highlights || []));
-      localStorage.setItem('metrics', JSON.stringify(config.metrics || []));
-      localStorage.setItem('boot_marker_regex', config.analysis.bootMarkerRegex || '');
-      localStorage.setItem('log_level_regex', config.analysis.logLevelRegex || '');
-      localStorage.setItem('timestamp_regex', config.analysis.timestampRegex || '');
-      localStorage.setItem('time_gap_threshold', (config.analysis.timeGapThreshold || 0).toString());
-      localStorage.setItem('log_level_filter', JSON.stringify(config.analysis.logLevelFilter || []));
-      
-      // 触发一次过滤
-      setTimeout(() => get().filterLogLines(), 0);
-      
+      get().filterLogLines();
       return true;
     } catch (err) {
-      console.error('Failed to import config:', err);
-      // alert('导入失败: ' + err);
       return false;
     }
   },
@@ -696,7 +777,6 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         return false;
       }
       set({ highlights: data.highlights });
-      localStorage.setItem('highlights', JSON.stringify(data.highlights));
       get().filterLogLines();
       return true;
     } catch (e) {
@@ -704,18 +784,13 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     }
   },
   
-  // 会话分割器管理实现
   addSessionSplitter: (name, regex, isRegex) => set((state) => {
     const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
-    const newSplitter: SessionSplitter = {
+    const newSplitters = [...state.sessionSplitters, {
       id: Date.now().toString(),
-      name,
-      regex,
-      enabled: true,
-      isRegex,
+      name, regex, enabled: true, isRegex,
       color: colors[state.sessionSplitters.length % colors.length]
-    };
-    const newSplitters = [...state.sessionSplitters, newSplitter];
+    }];
     localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
     return { sessionSplitters: newSplitters };
   }),
@@ -727,17 +802,13 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   }),
   
   toggleSessionSplitter: (id) => set((state) => {
-    const newSplitters = state.sessionSplitters.map(s => 
-      s.id === id ? { ...s, enabled: !s.enabled } : s
-    );
+    const newSplitters = state.sessionSplitters.map(s => s.id === id ? { ...s, enabled: !s.enabled } : s);
     localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
     return { sessionSplitters: newSplitters };
   }),
   
   updateSessionSplitter: (id, regex) => set((state) => {
-    const newSplitters = state.sessionSplitters.map(s => 
-      s.id === id ? { ...s, regex } : s
-    );
+    const newSplitters = state.sessionSplitters.map(s => s.id === id ? { ...s, regex } : s);
     localStorage.setItem('session_splitters', JSON.stringify(newSplitters));
     return { sessionSplitters: newSplitters };
   }),
@@ -751,23 +822,16 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     const state = get();
     const currentFile = state.files.find(f => f.id === state.currentFileId);
     if (!currentFile) return;
-    
     const { loadLogFile } = await import('./utils/logLoader');
     await loadLogFile(currentFile.path);
   },
   
   filterLogLines: async () => {
     const { 
-      lineCount, 
-      logLevelFilter, 
-      selectedSessionIds, 
-      sessions, 
-      highlights, 
-      showOnlyHighlights,
-      highlightContextLines
+      logLevelFilter, selectedSessionIds, sessions, 
+      highlights, showOnlyHighlights, highlightContextLines, lineCount
     } = get();
     
-    // 1. 基础范围：会话过滤
     let lineRanges: [number, number][] | null = null;
     if (selectedSessionIds && selectedSessionIds.length > 0) {
       lineRanges = selectedSessionIds.map(id => {
@@ -781,10 +845,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         ? highlights.filter(h => h.enabled).map(h => h.text)
         : [];
 
-      // 核心调整：如果在脱水模式下没有有效的关键字，我们不应该显示全部，而是显示空或者警告
-      // 这里的逻辑维持现状（显示空），但要确保 activeHighlights 抓取到了内容
       if (showOnlyHighlights && activeHighlights.length === 0) {
-        console.warn('Dehydration mode on but no active highlights found.');
         set({ filteredIndices: [] });
         return;
       }
@@ -796,11 +857,8 @@ export const useLogStore = create<LogViewState>((set, get) => ({
         contextLines: showOnlyHighlights ? highlightContextLines : 0,
         refinements: [...get().refinementFilters, get().transientRefinement].filter(r => r.trim() !== '')
       });
-      
       set({ filteredIndices: indices });
     } catch (err) {
-      console.error('Failed to filter logs:', err);
-      // 回退方案：至少显示会话范围内的日志
       const simpleIndices = [];
       if (lineRanges) {
         for (const [start, end] of lineRanges) {
@@ -814,7 +872,6 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   },
 }));
 
-// Initialize active profile if no saved regex found
 const initialState = useLogStore.getState();
 if (!localStorage.getItem('boot_marker_regex') && initialState.profiles.length > 0) {
   const activeProfile = initialState.profiles.find(p => p.id === initialState.activeProfileId) || initialState.profiles[0];
@@ -824,4 +881,3 @@ if (!localStorage.getItem('boot_marker_regex') && initialState.profiles.length >
     timestampRegex: activeProfile.timestampRegex || '\\[(.*?)\\]'
   });
 }
-

@@ -16,6 +16,8 @@ export default function Header() {
   const setSidebarOpen = useLogStore((state) => state.setSidebarOpen);
   const isAiPanelOpen = useLogStore((state) => state.isAiPanelOpen);
   const setAiPanelOpen = useLogStore((state) => state.setAiPanelOpen);
+  const isDualPane = useLogStore((state) => state.isDualPane);
+  const setDualPane = useLogStore((state) => state.setDualPane);
   
   const currentFile = files.find(f => f.id === currentFileId);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -68,6 +70,18 @@ export default function Header() {
           className={`p-1.5 rounded-md transition-colors ${isAiPanelOpen ? 'text-blue-400 bg-blue-500/10' : 'text-gray-400 hover:bg-gray-700'}`}
         >
           <span className="text-lg">✨</span>
+        </button>
+
+        <button
+          onClick={() => setDualPane(!isDualPane)}
+          title={isDualPane ? "关闭双分窗 (双侧独立过滤)" : "开启双分窗 (对比/追踪模式)"}
+          className={`p-1.5 rounded-md transition-all ${isDualPane ? 'text-indigo-400 bg-indigo-500/10 border border-indigo-500/30' : 'text-gray-400 hover:bg-gray-700 hover:text-indigo-300'}`}
+        >
+          <span className="text-sm font-bold flex items-center space-x-1">
+            <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7" />
+            </svg>
+          </span>
         </button>
 
         <div className="flex items-baseline space-x-2">
