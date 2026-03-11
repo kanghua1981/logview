@@ -7,10 +7,45 @@ interface LogPaneProps {
   side: 'left' | 'right';
 }
 
+// 提取独立的行组件以减少重绘
+const LogLineRow = React.memo(({ 
+  originalLineIndex, 
+  level, 
+  isHighlighted, 
+  fontSize, 
+  isWordWrap,
+  timeDelta, 
+  highlightedContent, 
+  getLevelColor, 
+  onLineNumberClick
+}: any) => {
+  return (
+    <div 
+      className={`flex w-full group transition-colors duration-200 border-l-2 ${isHighlighted ? 'border-blue-500 bg-blue-500/20' : 'border-transparent'} ${getLevelColor(level)}`}
+      style={{ fontSize: `${fontSize}px`, minHeight: `${fontSize + 4}px` }}
+    >
+      <div 
+        className="w-16 shrink-0 text-right pr-3 text-gray-600 select-none font-mono opacity-60 group-hover:opacity-100 italic flex items-center justify-end cursor-pointer hover:text-blue-400"
+        onClick={() => onLineNumberClick(originalLineIndex + 1)}
+      >
+        {originalLineIndex + 1}
+      </div>
+      <div className={`flex-1 font-mono ${isWordWrap ? 'whitespace-pre-wrap break-all' : 'whitespace-pre overflow-x-auto'} py-0.5 px-1 leading-tight tracking-tight selection:bg-blue-500/30`}>
+        {highlightedContent}
+      </div>
+      {timeDelta !== null && timeDelta > 1000 && (
+        <div className="shrink-0 px-2 flex items-center text-[10px] text-orange-500/60 font-mono">
+          +{ (timeDelta / 1000).toFixed(1) }s
+        </div>
+      )}
+    </div>
+  );
+});
+
 export default function LogPane({ side }: LogPaneProps) {
   const isLeft = side === 'left';
   
-  // 选择侧相关的 Store 状态
+  // 选择侧相关的 Store 状态 - 使用更精准的选择器减小重渲染范围
   const filteredIndices = useLogStore((state) => isLeft ? state.filteredIndices : state.rightFilteredIndices);
   const refinementFilters = useLogStore((state) => isLeft ? state.refinementFilters : state.rightRefinementFilters);
   const scrollTargetLine = useLogStore((state) => isLeft ? state.scrollTargetLine : state.rightScrollTargetLine);
@@ -25,10 +60,21 @@ export default function LogPane({ side }: LogPaneProps) {
   const lineContents = useLogStore((state) => state.lineContents);
   const highlights = useLogStore((state) => state.highlights);
   const fontSize = useLogStore((state) => state.fontSize);
+  const isWordWrap = useLogStore((state) => state.isWordWrap);
   const timestampRegex = useLogStore((state) => state.timestampRegex);
   const flashLine = useLogStore((state) => state.flashLine); 
   const currentFileId = useLogStore((state) => state.currentFileId);
   const activeView = useLogStore((state) => state.activeView);
+
+  // 预编译正则对象提高滚动性能
+  const tsRegexCached = React.useMemo(() => new RegExp(timestampRegex), [timestampRegex]);
+  const highlightRegexes = React.useMemo(() => 
+    highlights.filter(h => h.enabled).map(h => ({
+      id: h.id,
+      color: h.color,
+      regex: new RegExp(`(${h.text})`, 'gi'),
+      text: h.text
+    })), [highlights]);
 
   // 本地搜索项
   const [localSearch, setLocalSearch] = useState('');
@@ -46,7 +92,7 @@ export default function LogPane({ side }: LogPaneProps) {
     if (filter.startsWith('!')) return { label: 'Exclude', text: filter.substring(1), icon: '✕', color: 'text-red-400', bg: 'bg-red-900/40', border: 'border-red-900/50' };
     if (filter.startsWith('/')) return { label: 'Regex', text: filter.substring(1), icon: '◈', color: 'text-purple-400', bg: 'bg-purple-900/40', border: 'border-purple-900/50' };
     if (filter.startsWith('=')) return { label: 'Exact', text: filter.substring(1), icon: '≡', color: 'text-emerald-400', bg: 'bg-emerald-900/40', border: 'border-emerald-900/50' };
-    if (filter.startsWith('?')) return { label: 'AI', text: filter.substring(1), icon: '✨', color: 'text-blue-400', bg: 'bg-blue-900/40', border: 'border-blue-900/50' };
+    if (filter.startsWith('?')) return { label: 'AI', text: filter.substring(1), icon: '✨', color: 'text-blue-400', bg: 'bg-blue-900/40', border: 'border-blue-700/50' };
     if (filter.startsWith(':')) return { label: 'Command', text: filter.substring(1), icon: '⌨', color: 'text-amber-400', bg: 'bg-amber-900/40', border: 'border-amber-900/50' };
     if (filter.startsWith('@')) return { label: 'Time', text: filter.substring(1), icon: '🕒', color: 'text-cyan-400', bg: 'bg-cyan-900/40', border: 'border-cyan-900/50' };
     return { label: 'Include', text: filter, icon: '🔎', color: 'text-blue-300', bg: 'bg-blue-900/40', border: 'border-blue-700/50' };
@@ -144,8 +190,7 @@ export default function LogPane({ side }: LogPaneProps) {
   const calculateTimeDelta = (currentContent: string, previousContent: string) => {
     if (!previousContent || !currentContent) return null;
     const extractTs = (content: string) => {
-      const re = new RegExp(timestampRegex);
-      const match = content.match(re);
+      const match = content.match(tsRegexCached);
       if (match) {
         const tsStr = match[1] || match[0];
         const timeMatch = tsStr.match(/(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?/);
@@ -172,15 +217,29 @@ export default function LogPane({ side }: LogPaneProps) {
   };
 
   const fetchLogs = async (startIndex: number, endIndex: number) => {
-    const indicesToFetch = displayIndices.slice(startIndex, endIndex + 1);
+    // 增加数据预取范围：多抓取前后各 100 行，减少 IPC 调用频率
+    const buffer = 100;
+    const bufferedStart = Math.max(0, startIndex - buffer);
+    const bufferedEnd = Math.min(displayIndices.length - 1, endIndex + buffer);
+    
+    const visibleIndices = displayIndices.slice(bufferedStart, bufferedEnd + 1);
+    if (visibleIndices.length === 0) return;
+
+    // 关键优化：只请求缓存中不存在的行，极大提升后续滑动性能
+    const store = useLogStore.getState();
+    const indicesToFetch = visibleIndices.filter(idx => !store.lineContents.has(idx + 1));
+    
     if (indicesToFetch.length === 0) return;
+
     try {
       const results = await invoke<any[]>('get_log_lines_by_indices', { indices: indicesToFetch });
-      useLogStore.getState().updateLogLinesContent(results.map(r => ({
-        lineNumber: r.line_number,
-        content: r.content,
-        level: r.level
-      })));
+      if (results.length > 0) {
+        store.updateLogLinesContent(results.map(r => ({
+          lineNumber: r.line_number,
+          content: r.content,
+          level: r.level
+        })));
+      }
     } catch (e) {
       console.error('Fetch logs failed:', e);
     }
@@ -203,7 +262,7 @@ export default function LogPane({ side }: LogPaneProps) {
   const handleScroll = (range: { startIndex: number; endIndex: number }) => {
     rangeRef.current = range;
     if (fetchTimeoutRef.current) clearTimeout(fetchTimeoutRef.current);
-    fetchTimeoutRef.current = setTimeout(() => fetchLogs(range.startIndex, range.endIndex), 50);
+    fetchTimeoutRef.current = setTimeout(() => fetchLogs(range.startIndex, range.endIndex), 20); // 压低到 20ms
   };
 
   // 当日志索引发生变化（如加载新文件或过滤条件改变）时，立即拉取当前可见区域的内容
@@ -216,17 +275,17 @@ export default function LogPane({ side }: LogPaneProps) {
   }, [displayIndices, currentFileId]);
 
   const highlightContent = (content: string) => {
-    if (!highlights.length) return content;
+    if (!highlightRegexes.length) return content;
     let parts: (string | React.ReactNode)[] = [content];
-    highlights.filter(h => h.enabled).forEach(h => {
+    
+    highlightRegexes.forEach(h => {
       const newParts: (string | React.ReactNode)[] = [];
       parts.forEach(part => {
         if (typeof part !== 'string') {
           newParts.push(part);
           return;
         }
-        const regex = new RegExp(`(${h.text})`, 'gi');
-        const split = part.split(regex);
+        const split = part.split(h.regex);
         split.forEach((s, i) => {
           if (s.toLowerCase() === h.text.toLowerCase()) {
             newParts.push(<mark key={`${h.id}-${i}`} style={{ backgroundColor: h.color, color: 'white', padding: '0 2px', borderRadius: '2px' }}>{s}</mark>);
@@ -299,16 +358,15 @@ export default function LogPane({ side }: LogPaneProps) {
                 const prefix = getActiveModeInfo().prefix;
                 if (refinementMode === 'ai' || trimmed.startsWith('?')) {
                   const query = trimmed.startsWith('?') ? trimmed.substring(1) : trimmed;
-                  useLogStore.getState().addAiMessage({ role: 'user', content: query });
-                  useLogStore.getState().setAiPanelOpen(true);
                   setLocalSearch('');
                   setTransientRefinement('');
+                  processCommand(query, 'ai', side);
                   return;
                 }
                 
                 if (refinementMode === 'command' || trimmed.startsWith(':')) {
                   const cmd = trimmed.startsWith(':') ? trimmed.substring(1) : trimmed;
-                  const result = await processCommand(cmd, 'command');
+                  const result = await processCommand(cmd, 'command', side);
                   if (result.success) {
                     setLocalSearch(''); setTransientRefinement(''); setRefinementMode('include');
                   } else if (result.message) {
@@ -319,7 +377,7 @@ export default function LogPane({ side }: LogPaneProps) {
 
                 if (refinementMode === 'time' || trimmed.startsWith('@')) {
                   const time = trimmed.startsWith('@') ? trimmed.substring(1) : trimmed;
-                  const result = await processCommand(time, 'time');
+                  const result = await processCommand(time, 'time', side);
                   if (result.success) {
                     setLocalSearch(''); setTransientRefinement(''); setRefinementMode('include');
                   }
@@ -366,31 +424,22 @@ export default function LogPane({ side }: LogPaneProps) {
             }
 
             return (
-              <div 
-                className={`flex w-full group transition-colors duration-200 border-l-2 ${isHighlighted ? 'border-blue-500 bg-blue-500/20' : 'border-transparent'} ${getLevelColor(level)}`}
-                style={{ fontSize: `${fontSize}px`, minHeight: `${fontSize + 4}px` }}
-              >
-                <div 
-                  className="w-16 shrink-0 text-right pr-3 text-gray-600 select-none font-mono opacity-60 group-hover:opacity-100 italic flex items-center justify-end cursor-pointer hover:text-blue-400"
-                  onClick={() => {
-                    if (isLeft) {
-                      useLogStore.getState().setRightScrollTargetLine(originalLineIndex + 1);
-                    }
-                  }}
-                >
-                  {originalLineIndex + 1}
-                </div>
-                <div className="flex-1 font-mono whitespace-pre break-all py-0.5 px-1 leading-tight tracking-tight selection:bg-blue-500/30">
-                  {highlightContent(content)}
-                </div>
-                {timeDelta !== null && timeDelta > 1000 && (
-                  <div className="shrink-0 px-2 flex items-center">
-                    <span className="text-[10px] text-orange-500/60 font-mono">
-                      +{ (timeDelta / 1000).toFixed(1) }s
-                    </span>
-                  </div>
-                )}
-              </div>
+              <LogLineRow
+                key={index}
+                originalLineIndex={originalLineIndex}
+                level={level}
+                isHighlighted={isHighlighted}
+                fontSize={fontSize}
+                isWordWrap={isWordWrap}
+                timeDelta={timeDelta}
+                highlightedContent={highlightContent(content)}
+                getLevelColor={getLevelColor}
+                onLineNumberClick={(lineValue: number) => {
+                  if (isLeft) {
+                    useLogStore.getState().setRightScrollTargetLine(lineValue);
+                  }
+                }}
+              />
             );
           }}
         />
@@ -399,7 +448,7 @@ export default function LogPane({ side }: LogPaneProps) {
   );
 }
 
-async function processCommand(cmd: string, mode: 'command' | 'time') {
+async function processCommand(cmd: string, mode: 'command' | 'time' | 'ai', side: 'left' | 'right' = 'left') {
   const { processCommand: realProcessCommand } = await import('../utils/commandProcessor');
-  return realProcessCommand(cmd, mode);
+  return realProcessCommand(cmd, mode, side);
 }

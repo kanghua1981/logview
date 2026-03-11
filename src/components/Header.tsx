@@ -18,6 +18,8 @@ export default function Header() {
   const setAiPanelOpen = useLogStore((state) => state.setAiPanelOpen);
   const isDualPane = useLogStore((state) => state.isDualPane);
   const setDualPane = useLogStore((state) => state.setDualPane);
+  const isWordWrap = useLogStore((state) => state.isWordWrap);
+  const setWordWrap = useLogStore((state) => state.setWordWrap);
   
   const currentFile = files.find(f => f.id === currentFileId);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -81,6 +83,16 @@ export default function Header() {
             <svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M9 17V7m0 10a2 2 0 01-2 2H5a2 2 0 01-2-2V7a2 2 0 012-2h2a2 2 0 012 2m0 10a2 2 0 002 2h2a2 2 0 002-2M9 7a2 2 0 012-2h2a2 2 0 012 2m0 10V7" />
             </svg>
+          </span>
+        </button>
+
+        <button
+          onClick={() => setWordWrap(!isWordWrap)}
+          title={isWordWrap ? "禁止换行 (水平滚动)" : "自动换行 (折行显示)"}
+          className={`p-1.5 h-8 flex items-center rounded-md transition-all ${isWordWrap ? 'text-emerald-400 bg-emerald-500/10 border border-emerald-500/30' : 'text-gray-400 hover:bg-gray-700 hover:text-emerald-300'}`}
+        >
+          <span className="text-[10px] font-bold font-mono tracking-tighter uppercase">
+            {isWordWrap ? 'Wrap On' : 'Wrap Off'}
           </span>
         </button>
 

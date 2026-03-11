@@ -121,6 +121,7 @@ interface LogViewState {
 
   // 字体大小
   fontSize: number;
+  isWordWrap: boolean;
   refinementFilters: string[];
   transientRefinement: string;
 
@@ -141,14 +142,22 @@ interface LogViewState {
   hasAnalyzedWorkflows: boolean;
 
   // AI 相关
-  aiMessages: Array<{ role: 'user' | 'assistant' | 'system', content: string }>;
+  aiMessages: Array<{ 
+    role: 'user' | 'assistant' | 'system' | 'tool', 
+    content: string | null,
+    tool_calls?: any[],
+    tool_call_id?: string,
+    name?: string
+  }>;
   isAiLoading: boolean;
+  aiShouldAbort: boolean;
   isAiPanelOpen: boolean;
   aiPanelWidth: number;
   aiEndpoint: string;
   aiModel: string;
   aiApiKey: string;
   aiSystemPrompt: string;
+  aiMaxIterations: number;
 
   // 布局相关
   isSidebarOpen: boolean;
@@ -217,15 +226,28 @@ interface LogViewState {
   filterRightLogLines: () => Promise<void>;
 
   setFontSize: (size: number | ((prev: number) => number)) => void;
+  setWordWrap: (wrap: boolean) => void;
 
-  // AI Actions
-  setAiMessages: (messages: Array<{ role: 'user' | 'assistant' | 'system', content: string }>) => void;
-  addAiMessage: (message: { role: 'user' | 'assistant' | 'system', content: string }) => void;
+  setAiMessages: (messages: Array<{ 
+    role: 'user' | 'assistant' | 'system' | 'tool', 
+    content: string | null,
+    tool_calls?: any[],
+    tool_call_id?: string,
+    name?: string
+  }>) => void;
+  addAiMessage: (message: { 
+    role: 'user' | 'assistant' | 'system' | 'tool', 
+    content: string | null,
+    tool_calls?: any[],
+    tool_call_id?: string,
+    name?: string
+  }) => void;
   setAiLoading: (loading: boolean) => void;
+  setAiShouldAbort: (abort: boolean) => void;
   setAiPanelOpen: (open: boolean) => void;
   setAiPanelWidth: (width: number) => void;
   clearAiMessages: () => void;
-  setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string, systemPrompt?: string }) => void;
+  setAiConfig: (config: { endpoint?: string, model?: string, apiKey?: string, systemPrompt?: string, maxIterations?: number }) => void;
 
   // 布局 Actions
   setSidebarOpen: (open: boolean) => void;
@@ -281,6 +303,7 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   searchOnlySelectedSessions: false,
   isSearchRegex: false,
   fontSize: Number(localStorage.getItem('font_size')) || 12,
+  isWordWrap: localStorage.getItem('is_word_wrap') !== 'false', // 默认开启
   refinementFilters: [],
   transientRefinement: '',
 
@@ -299,12 +322,14 @@ export const useLogStore = create<LogViewState>((set, get) => ({
   hasAnalyzedWorkflows: false,
   aiMessages: [],
   isAiLoading: false,
+  aiShouldAbort: false,
   isAiPanelOpen: false,
   aiPanelWidth: Number(localStorage.getItem('ai_panel_width')) || 384,
   aiEndpoint: localStorage.getItem('ai_endpoint') || 'https://api.openai.com/v1',
   aiModel: localStorage.getItem('ai_model') || 'gpt-4o',
   aiApiKey: localStorage.getItem('ai_api_key') || '',
   aiSystemPrompt: localStorage.getItem('ai_system_prompt') || '你是一个专业的日志分析专家，擅长从混合日志中定位根因。请基于提供的路径上下文和采样行进行推理。',
+  aiMaxIterations: Number(localStorage.getItem('ai_max_iterations')) || 20,
   
   isSidebarOpen: localStorage.getItem('is_sidebar_open') !== 'false',
   sidebarWidth: Number(localStorage.getItem('sidebar_width')) || 320,
@@ -649,9 +674,15 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     return { fontSize: clampedSize };
   }),
 
+  setWordWrap: (wrap) => {
+    localStorage.setItem('is_word_wrap', wrap.toString());
+    set({ isWordWrap: wrap });
+  },
+
   setAiMessages: (messages) => set({ aiMessages: messages }),
   addAiMessage: (message) => set((state) => ({ aiMessages: [...state.aiMessages, message] })),
   setAiLoading: (loading) => set({ isAiLoading: loading }),
+  setAiShouldAbort: (abort) => set({ aiShouldAbort: abort }),
   setAiPanelOpen: (open) => set({ isAiPanelOpen: open }),
   setAiPanelWidth: (width) => {
     localStorage.setItem('ai_panel_width', width.toString());
@@ -663,11 +694,13 @@ export const useLogStore = create<LogViewState>((set, get) => ({
     if (config.model !== undefined) localStorage.setItem('ai_model', config.model);
     if (config.apiKey !== undefined) localStorage.setItem('ai_api_key', config.apiKey);
     if (config.systemPrompt !== undefined) localStorage.setItem('ai_system_prompt', config.systemPrompt);
+    if (config.maxIterations !== undefined) localStorage.setItem('ai_max_iterations', config.maxIterations.toString());
     return {
       aiEndpoint: config.endpoint ?? state.aiEndpoint,
       aiModel: config.model ?? state.aiModel,
       aiApiKey: config.apiKey ?? state.aiApiKey,
       aiSystemPrompt: config.systemPrompt ?? state.aiSystemPrompt,
+      aiMaxIterations: config.maxIterations ?? state.aiMaxIterations,
     };
   }),
   

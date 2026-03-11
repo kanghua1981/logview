@@ -10,26 +10,242 @@ export interface CommandResult {
   action?: 'export' | 'jump' | 'clear' | 'open' | 'none';
 }
 
+const LOG_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'add_filter',
+      description: 'Add a search filter (breadcrumb) to narrow down logs. Use this when the user wants to see specific logs or you need to focus on certain patterns.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'The filter pattern to add. Rules: (1) Plain text like "error" = case-insensitive substring match. (2) IMPORTANT: to use regex, you MUST wrap it with slashes like "/error.*timeout/i" — bare regex without slashes will NOT work as regex. (3) Prefix ! to exclude e.g. "!debug". (4) Prefix = for exact full-line match. Always prefer plain text for simple keywords and /regex/ only when you need multi-word patterns or alternation.'
+          },
+          reason: {
+            type: 'string',
+            description: 'Why this filter is being added.'
+          }
+        },
+        required: ['pattern']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'add_metric',
+      description: 'Add a numeric metric to track and visualize from logs (e.g., latency, memory).',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Display name of the metric.'
+          },
+          regex: {
+            type: 'string',
+            description: 'Regex with exactly one capture group for the numeric value (e.g., "latency:(\\d+)ms").'
+          }
+        },
+        required: ['name', 'regex']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'jump_to_line',
+      description: 'Jump the log viewer to a specific line number.',
+      parameters: {
+        type: 'object',
+        properties: {
+          line_number: {
+            type: 'number',
+            description: 'The 1-based line number to jump to.'
+          }
+        },
+        required: ['line_number']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'del_filter',
+      description: 'Remove a specific filter from the active filter list by its exact pattern string, or clear ALL filters if no pattern is provided.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: {
+            type: 'string',
+            description: 'The exact filter pattern to remove. Omit or pass empty string to clear all filters.'
+          }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'read_log_lines',
+      description: 'Read raw log lines around a specific line number to inspect actual log content. Use this to understand what is in the log before filtering or to investigate anomalies.',
+      parameters: {
+        type: 'object',
+        properties: {
+          line_number: {
+            type: 'number',
+            description: 'The center line number (1-based) to read around.'
+          },
+          context: {
+            type: 'number',
+            description: 'Number of lines before and after to include (default 15, max 100).'
+          }
+        },
+        required: ['line_number']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'search_log_content',
+      description: 'Search the full log for lines matching a pattern. Returns matching line numbers and content. Use before adding filters to confirm a pattern actually exists.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'The text or regex pattern to search for.'
+          },
+          is_regex: {
+            type: 'boolean',
+            description: 'Whether to treat query as a regex (default false).'
+          },
+          max_results: {
+            type: 'number',
+            description: 'Maximum number of results to return (default 20, max 100).'
+          }
+        },
+        required: ['query']
+      }
+    }
+  }
+];
+
+async function handleToolCalls(tool_calls: any[]): Promise<any[]> {
+  const store = useLogStore.getState();
+  const results = [];
+
+  for (const tool_call of tool_calls) {
+    const { name, arguments: argsString } = tool_call.function;
+    const args = JSON.parse(argsString);
+    let result = "Success";
+
+    console.log(`Executing tool: ${name}`, args);
+
+    if (name === 'add_filter') {
+      store.addRefinementFilter(args.pattern);
+      result = `Added filter: ${args.pattern}`;
+    } else if (name === 'add_metric') {
+      store.addMetric(args.name, args.regex);
+      result = `Added metric: ${args.name} with regex ${args.regex}`;
+    } else if (name === 'jump_to_line') {
+      const idx = args.line_number - 1;
+      store.setScrollTargetLine(idx);
+      store.setFlashLine(idx);
+      setTimeout(() => store.setFlashLine(null), 2000);
+      result = `Jumped to line: ${args.line_number}`;
+    } else if (name === 'del_filter') {
+      const pattern = args.pattern as string | undefined;
+      if (!pattern) {
+        store.setRefinementFilters([]);
+        result = 'Cleared all filters.';
+      } else {
+        const filters = store.refinementFilters;
+        const idx = filters.indexOf(pattern);
+        if (idx >= 0) {
+          store.removeRefinementFilter(idx);
+          result = `Removed filter: ${pattern}`;
+        } else {
+          result = `Filter not found: "${pattern}". Current filters: [${filters.join(', ')}]`;
+        }
+      }
+    } else if (name === 'read_log_lines') {
+      const lineNum = Math.max(1, Math.floor(args.line_number));
+      const ctx = Math.min(100, Math.max(1, Math.floor(args.context ?? 15)));
+      const startLine = Math.max(1, lineNum - ctx);
+      const endLine = lineNum + ctx;
+      try {
+        const lines = await invoke<Array<{ line_number: number; content: string; level: string }>>('get_log_range', {
+          startLine,
+          endLine
+        });
+        if (lines.length === 0) {
+          result = 'No lines returned (file may not be open or range out of bounds).';
+        } else {
+          result = lines.map(l => `[L${l.line_number}] ${l.content.trimEnd()}`).join('\n');
+        }
+      } catch (e) {
+        result = `Error reading lines: ${e}`;
+      }
+    } else if (name === 'search_log_content') {
+      const maxResults = Math.min(100, Math.max(1, Math.floor(args.max_results ?? 20)));
+      try {
+        const lines = await invoke<Array<{ line_number: number; content: string; level: string }>>('search_log', {
+          query: args.query as string,
+          isRegex: args.is_regex ?? false,
+          lineRanges: null
+        });
+        if (lines.length === 0) {
+          result = `No matches found for: "${args.query}"`;
+        } else {
+          const shown = lines.slice(0, maxResults);
+          result = `Found ${lines.length} match(es), showing first ${shown.length}:\n` +
+            shown.map(l => `[L${l.line_number}] ${l.content.trimEnd()}`).join('\n');
+        }
+      } catch (e) {
+        result = `Error searching: ${e}`;
+      }
+    }
+
+    results.push({
+      role: 'tool',
+      tool_call_id: tool_call.id,
+      name: name,
+      content: result
+    });
+  }
+
+  return results;
+}
+
 /**
  * 处理命令模式 (:), 时间模式 (@) 和 AI 模式 (?) 的逻辑
  * @param input 原始输入内容 (不含前缀)
  * @param mode 当前模式
+ * @param side 是从左窗还是右窗发起的 (用于双分窗模式下的跳转逻辑)
  * @returns 处理结果
  */
-export const processCommand = async (input: string, mode: 'command' | 'time' | 'ai'): Promise<CommandResult> => {
+export const processCommand = async (input: string, mode: 'command' | 'time' | 'ai', side: 'left' | 'right' = 'left'): Promise<CommandResult> => {
   const store = useLogStore.getState();
   const cmd = input.trim();
+  const isLeft = side === 'left';
 
   if (mode === 'command') {
     // 1. 基础跳转指令
     if (cmd === 'top' || cmd === 't') {
-      store.setScrollTargetLine(0);
+      if (isLeft) store.setScrollTargetLine(0);
+      else store.setRightScrollTargetLine(0);
       return { success: true, message: '已跳转至顶部', action: 'jump' };
     }
     
     if (cmd === 'bot' || cmd === 'b') {
       const target = store.lineCount > 0 ? store.lineCount - 1 : 0;
-      store.setScrollTargetLine(target);
+      if (isLeft) store.setScrollTargetLine(target);
+      else store.setRightScrollTargetLine(target);
       return { success: true, message: '已跳转至底部', action: 'jump' };
     }
 
@@ -38,9 +254,13 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
       const lineNum = parseInt(cmd);
       if (lineNum > 0 && lineNum <= store.lineCount) {
         const idx = lineNum - 1;
-        store.setScrollTargetLine(idx);
-        store.setFlashLine(idx);
-        setTimeout(() => store.setFlashLine(null), 2000);
+        if (isLeft) {
+          store.setScrollTargetLine(idx);
+          store.setFlashLine(idx);
+          setTimeout(() => store.setFlashLine(null), 2000);
+        } else {
+          store.setRightScrollTargetLine(idx);
+        }
         return { success: true, message: `已跳转至第 ${lineNum} 行`, action: 'jump' };
       } else {
         return { success: false, message: `行号超出范围 (1-${store.lineCount})` };
@@ -49,7 +269,7 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
 
     // 3. 导出指令
     if (cmd === 'export' || cmd === 'exp') {
-      const displayIndices = store.filteredIndices;
+      const displayIndices = isLeft ? store.filteredIndices : store.rightFilteredIndices;
       if (displayIndices.length === 0) return { success: false, message: '当前视图无内容可导出' };
       
       try {
@@ -87,7 +307,8 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
 
     // 5. 清空精简器
     if (cmd === 'clear') {
-      store.setRefinementFilters([]);
+      if (isLeft) store.setRefinementFilters([]);
+      else store.setRightRefinementFilters([]);
       return { success: true, message: '已清空所有精简器', action: 'clear' };
     }
 
@@ -112,9 +333,13 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
       });
 
       if (targetIdx !== null) {
-        store.setScrollTargetLine(targetIdx);
-        store.setFlashLine(targetIdx);
-        setTimeout(() => store.setFlashLine(null), 2000);
+        if (isLeft) {
+          store.setScrollTargetLine(targetIdx);
+          store.setFlashLine(targetIdx);
+          setTimeout(() => store.setFlashLine(null), 2000);
+        } else {
+          store.setRightScrollTargetLine(targetIdx);
+        }
         return { success: true, message: `已定位到包含 "${cmd}" 的行`, action: 'jump' };
       } else {
         return { success: false, message: `未找到时间标记: ${cmd}` };
@@ -129,16 +354,18 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
 
     store.setAiPanelOpen(true);
     store.setAiLoading(true);
-    store.addAiMessage({ role: 'user', content: cmd });
 
     try {
       const context = await collectAiContext();
-      const { aiEndpoint, aiModel, aiApiKey, aiSystemPrompt } = useLogStore.getState();
-      
+      // 在 addAiMessage 之前捕获历史，这样历史不含本轮 user 消息
+      const { aiEndpoint, aiModel, aiApiKey, aiSystemPrompt, aiMessages, aiMaxIterations } = useLogStore.getState();
+
+      store.addAiMessage({ role: 'user', content: cmd });
+
       if (!aiApiKey) {
         store.addAiMessage({ 
           role: 'assistant', 
-          content: '❌ 未在配置中找到 API Key。请前往左侧“配置”面板设置您的 AI 提供商信息（Endpoint, Model, API Key）。' 
+          content: '❌ 未在配置中找到 API Key。请前往左侧"配置"面板设置您的 AI 提供商信息（Endpoint, Model, API Key）。' 
         });
         return { success: true }; 
       }
@@ -155,38 +382,97 @@ export const processCommand = async (input: string, mode: 'command' | 'time' | '
       
       const technicalProtocol = `
 ---
-注意：
-1. 如果发现关键字有助于排查，请在末尾按此格式建议过滤:
-   FILTER: <pattern> || <说明建议理由>
-   (pattern 规范: 直接写正则，或以 ! 开头表示排除，或以 = 开头表示精确匹配)
-
-2. 如果日志中有可量化的数值（如内存、延迟、温度、码率等），请按此格式建议指标提取:
-   METRIC: <指标名称> || <带捕获组的正则表达式> || <指标含义说明>
-   (例如: METRIC: 内存占用 || free:(\d+) || 监控剩余内存变化趋势)
+你是一个自主分析 Agent，可以反复调用工具来缩小范围、定位问题，直到找到答案再输出总结。
+工具说明:
+- add_filter: 添加过滤条件缩小日志范围
+- add_metric: 提取数值指标用于趋势分析
+- jump_to_line: 跳转到关键行让用户查看
+策略: 如果一次过滤后还有疑问，继续调用工具深入分析，不要过早给出模糊结论。
 `;
 
-      const response = await invoke<string>('call_openai_api', {
-        baseUrl: aiEndpoint,
-        apiKey: aiApiKey,
-        model: aiModel,
-        messages: [
-          { 
-            role: 'system', 
-            content: `${aiSystemPrompt}\n${technicalProtocol}` 
-          },
-          { role: 'user', content: prompt }
-        ]
-      });
+      // 构建本轮 Agent 运行的消息列表（独立维护，不依赖 store 状态变化）
+      let runMessages: any[] = [
+        { 
+          role: 'system', 
+          content: `${aiSystemPrompt}\n${technicalProtocol}` 
+        },
+        // aiMessages 是本轮前的历史，直接用，不需要 slice
+        ...aiMessages.map(m => ({
+          role: m.role,
+          content: m.content,
+          tool_calls: m.tool_calls,
+          tool_call_id: m.tool_call_id,
+          name: m.name
+        })),
+        { role: 'user', content: prompt }
+      ];
 
-      store.addAiMessage({ role: 'assistant', content: response });
+      // 限制总历史长度，保留 system + 最近 11 条
+      if (runMessages.length > 12) {
+        runMessages = [runMessages[0], ...runMessages.slice(-11)];
+      }
+
+      // === Agent 循环：最多 N 轮，直到 AI 不再调用工具为止 ===
+      store.setAiShouldAbort(false);
+      const MAX_ITERATIONS = aiMaxIterations;
+      let iterations = 0;
+
+      while (iterations < MAX_ITERATIONS) {
+        // 用户点击停止
+        if (useLogStore.getState().aiShouldAbort) {
+          store.addAiMessage({ role: 'assistant', content: '⏹️ 已手动停止分析。' });
+          break;
+        }
+        iterations++;
+
+        const response = await invoke<any>('call_openai_api', {
+          baseUrl: aiEndpoint,
+          apiKey: aiApiKey,
+          model: aiModel,
+          messages: runMessages,
+          tools: LOG_TOOLS
+        });
+
+        // 存入 store 显示，同时追加进本轮消息链
+        store.addAiMessage({ 
+          role: 'assistant', 
+          content: response.content || null,
+          tool_calls: response.tool_calls
+        });
+        runMessages.push({
+          role: 'assistant',
+          content: response.content || null,
+          tool_calls: response.tool_calls
+        });
+
+        // 没有工具调用 → AI 分析完毕，退出循环
+        if (!response.tool_calls || response.tool_calls.length === 0) {
+          break;
+        }
+
+        // 执行工具调用，结果追加进消息链
+        const toolResults = await handleToolCalls(response.tool_calls);
+        for (const res of toolResults) {
+          store.addAiMessage(res);
+          runMessages.push(res);
+        }
+      }
+
+      if (iterations >= MAX_ITERATIONS && !useLogStore.getState().aiShouldAbort) {
+        store.addAiMessage({
+          role: 'assistant',
+          content: `⚠️ 已达到最大分析轮次（${MAX_ITERATIONS}轮），自动停止。如需继续，请追问。`
+        });
+      }
+
       return { success: true };
     } catch (e) {
+      console.error("AI Error:", e);
       store.addAiMessage({ role: 'assistant', content: `❌ 分析失败: ${e}` });
       return { success: false, message: 'AI 分析失败' };
     } finally {
       store.setAiLoading(false);
     }
   }
-
   return { success: false };
 };

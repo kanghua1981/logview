@@ -1278,13 +1278,19 @@ async fn find_first_occurrence(
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     role: String,
-    content: String,
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<serde_json::Value>>,
     stream: bool,
 }
 
@@ -1294,11 +1300,13 @@ async fn call_openai_api(
     api_key: String,
     model: String,
     messages: Vec<ChatMessage>,
-) -> Result<String, String> {
+    tools: Option<Vec<serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let request = ChatRequest {
         model,
         messages,
+        tools,
         stream: false,
     };
 
@@ -1324,12 +1332,12 @@ async fn call_openai_api(
 
     let result: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     
-    let content = result["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("Failed to extract content from AI response")?
-        .to_string();
+    let message = result["choices"][0]["message"].clone();
+    if message.is_null() {
+        return Err("Failed to extract message from AI response".to_string());
+    }
 
-    Ok(content)
+    Ok(message)
 }
 
 #[tauri::command]

@@ -11,6 +11,7 @@ export default function AiSidePanel() {
   const setAiPanelWidth = useLogStore((state) => state.setAiPanelWidth);
   const aiMessages = useLogStore((state) => state.aiMessages);
   const isAiLoading = useLogStore((state) => state.isAiLoading);
+  const setAiShouldAbort = useLogStore((state) => state.setAiShouldAbort);
   const clearAiMessages = useLogStore((state) => state.clearAiMessages);
   const addRefinementFilter = useLogStore((state) => state.addRefinementFilter);
   const activeView = useLogStore((state) => state.activeView);
@@ -88,9 +89,11 @@ export default function AiSidePanel() {
       });
 
       if (path) {
-        const reportContent = aiMessages.map(msg => 
-          `### ${msg.role === 'user' ? '👤 Question' : '✨ Analysis'}\n\n${msg.content}\n\n---`
-        ).join('\n\n');
+        const reportContent = aiMessages
+          .filter(msg => msg.role === 'user' || (msg.role === 'assistant' && msg.content))
+          .map(msg => 
+            `### ${msg.role === 'user' ? '👤 Question' : '✨ Analysis'}\n\n${msg.content || ''}\n\n---`
+          ).join('\n\n');
         
         const fullReport = `# LogView AI Analysis Report\n\nGenerated at: ${new Date().toLocaleString()}\n\n${reportContent}`;
         
@@ -161,9 +164,20 @@ export default function AiSidePanel() {
           </div>
         ) : (
           aiMessages.map((msg, idx) => {
+            if (msg.role === 'tool') {
+              return (
+                <div key={idx} className="flex flex-col items-start opacity-60">
+                  <div className="bg-gray-900 text-gray-400 text-[10px] px-2 py-1 rounded font-mono flex items-center gap-1 border border-gray-800">
+                    <span>🛠️ Tool Result ({msg.name}):</span>
+                    <span>{msg.content}</span>
+                  </div>
+                </div>
+              );
+            }
+
             const { cleanContent, filters, metrics } = msg.role === 'assistant' 
-              ? parseFilters(msg.content) 
-              : { cleanContent: msg.content, filters: [], metrics: [] };
+              ? parseFilters(msg.content || '') 
+              : { cleanContent: msg.content || '', filters: [], metrics: [] };
             
             return (
               <div key={idx} className={`flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
@@ -174,6 +188,15 @@ export default function AiSidePanel() {
                 }`}>
                   {msg.role === 'assistant' ? (
                     <div className="space-y-3">
+                      {msg.tool_calls && msg.tool_calls.length > 0 && (
+                        <div className="flex flex-wrap gap-1 mb-2">
+                          {msg.tool_calls.map((tc: any, i: number) => (
+                            <span key={i} className="px-1.5 py-0.5 bg-purple-900/40 text-purple-300 text-[10px] rounded border border-purple-700/50 flex items-center gap-1">
+                              🛠️ {tc.function.name}
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="prose prose-invert prose-sm max-w-none">
                         <ReactMarkdown>{cleanContent}</ReactMarkdown>
                       </div>
@@ -286,14 +309,20 @@ export default function AiSidePanel() {
         )}
         
         {isAiLoading && (
-          <div className="flex flex-col items-start animate-pulse">
-            <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 rounded-bl-none">
+          <div className="flex flex-col items-start gap-2">
+            <div className="bg-gray-800 border border-gray-700 rounded-lg p-3 rounded-bl-none animate-pulse">
               <div className="flex space-x-2">
                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce" />
                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.2s]" />
                 <div className="w-2 h-2 bg-gray-500 rounded-full animate-bounce [animation-delay:0.4s]" />
               </div>
             </div>
+            <button
+              onClick={() => setAiShouldAbort(true)}
+              className="text-[10px] px-2 py-1 rounded bg-red-900/40 hover:bg-red-700/60 text-red-300 border border-red-800/50 transition-colors"
+            >
+              ⏹ 停止
+            </button>
           </div>
         )}
       </div>

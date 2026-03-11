@@ -30,6 +30,7 @@ export default function ConfigPanel() {
     aiModel,
     aiApiKey,
     aiSystemPrompt,
+    aiMaxIterations,
     setAiConfig
   } = useLogStore();
 
@@ -44,6 +45,7 @@ export default function ConfigPanel() {
   const [modelInput, setModelInput] = useState(aiModel);
   const [apiKeyInput, setApiKeyInput] = useState(aiApiKey);
   const [systemPromptInput, setSystemPromptInput] = useState(aiSystemPrompt);
+  const [maxIterationsInput, setMaxIterationsInput] = useState(aiMaxIterations);
 
   const currentFile = files.find(f => f.id === currentFileId);
 
@@ -56,11 +58,12 @@ export default function ConfigPanel() {
     setModelInput(aiModel);
     setApiKeyInput(aiApiKey);
     setSystemPromptInput(aiSystemPrompt);
+    setMaxIterationsInput(aiMaxIterations);
     const activeProfile = profiles.find(p => p.id === activeProfileId);
     if (activeProfile) {
       setProfileName(activeProfile.name);
     }
-  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles, aiEndpoint, aiModel, aiApiKey, aiSystemPrompt]);
+  }, [bootMarkerRegex, logLevelRegex, timestampRegex, activeProfileId, profiles, aiEndpoint, aiModel, aiApiKey, aiSystemPrompt, aiMaxIterations]);
 
   const logLevels = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'FATAL'];
 
@@ -337,6 +340,19 @@ export default function ConfigPanel() {
               * 正则过滤格式协议 (FILTER:) 会自动附加在你的提示词之后，无需重复设置。
             </p>
           </div>
+
+          <div>
+            <label className="text-[10px] text-gray-500 block mb-1 uppercase">最大分析轮数 (Agentic Loop)</label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              value={maxIterationsInput}
+              onChange={(e) => setMaxIterationsInput(Math.max(1, Math.min(50, Number(e.target.value))))}
+              className="w-full px-2 py-1.5 bg-gray-900 text-purple-200 rounded border border-purple-900/50 focus:border-purple-500 focus:outline-none text-[11px] font-mono"
+            />
+            <p className="text-[9px] text-gray-600 mt-1">AI 每次问答最多循环调用 tools 的次数（默认 20）</p>
+          </div>
           
           <button
             onClick={() => {
@@ -344,7 +360,8 @@ export default function ConfigPanel() {
                 endpoint: endpointInput,
                 model: modelInput,
                 apiKey: apiKeyInput,
-                systemPrompt: systemPromptInput
+                systemPrompt: systemPromptInput,
+                maxIterations: maxIterationsInput
               });
               alert('AI 配置已保存');
             }}

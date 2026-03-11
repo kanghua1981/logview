@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useLogStore } from './store';
 import Header from "./components/Header";
 import Sidebar from "./components/Sidebar";
@@ -7,6 +8,7 @@ import Dashboard from "./components/Dashboard";
 import MetricsPanel from "./components/MetricsPanel";
 import SearchResultsPanel from "./components/SearchResultsPanel";
 import AiSidePanel from "./components/AiSidePanel";
+import { loadLogFile } from './utils/logLoader';
 import "./App.css";
 
 function App() {
@@ -21,6 +23,18 @@ function App() {
     isAiPanelOpen,
     setAiPanelOpen
   } = useLogStore();
+
+  useEffect(() => {
+    const unlistenPromise = listen<string>('file-dropped', (event) => {
+      if (event.payload) {
+        loadLogFile(event.payload);
+      }
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     const handleWheel = (e: WheelEvent) => {
@@ -57,7 +71,7 @@ function App() {
       window.removeEventListener('wheel', handleWheel);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [setFontSize, isSearchPanelOpen, setSearchPanelOpen]);
+  }, [setFontSize, isSearchPanelOpen, setSearchPanelOpen, isSidebarOpen, setSidebarOpen, isAiPanelOpen, setAiPanelOpen]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-gray-900 text-white overflow-hidden">
